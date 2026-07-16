@@ -294,6 +294,18 @@ export function Workspace() {
   const runCompleted = activeJob?.rowsCompleted ?? 0;
   const runProgress = runTotal ? Math.min(100, Math.round((runCompleted / runTotal) * 100)) : 0;
   const isRunning = activeJob?.status === "running";
+  const jobStatusLabel = activeJob?.status === "running" ? `${runProgress}%`
+    : activeJob?.status === "queued" ? "Starting"
+    : activeJob?.status === "completed" ? "Done"
+    : activeJob?.status === "failed" ? "Failed"
+    : activeJob?.status === "cancelled" ? "Cancelled"
+    : "Paused";
+  const jobStatusDetail = activeJob?.status === "running" ? "Workers researching public sources"
+    : activeJob?.status === "queued" ? "Waiting for a worker to claim this job"
+    : activeJob?.status === "failed" ? "The worker stopped before completing this job"
+    : activeJob?.status === "completed" ? "Research completed"
+    : activeJob?.status === "cancelled" ? "Enrichment cancelled"
+    : "Workers safely paused";
 
   const filteredLeads = useMemo(() => {
     const needle = search.toLowerCase().trim();
@@ -337,12 +349,14 @@ export function Workspace() {
     setParseError(null);
     try {
       const imported = datasetToLeads(parsed);
-      await persistDataset(parsed, imported);
+      const result = await persistDataset(parsed, imported);
       await refreshWorkspace(user);
       setUploadOpen(false);
       setParsed(null);
       setView("enrichment");
-      setToast(`${imported.length.toLocaleString()} records saved and queued for enrichment.`);
+      setToast(result.mode === "saved" && result.workerStarted
+        ? `${imported.length.toLocaleString()} records saved. The worker is running.`
+        : `${imported.length.toLocaleString()} records saved, but the worker did not start. Press Retry on the job card.`);
     } catch (error) {
       setParseError(error instanceof Error ? error.message : "The dataset could not be saved.");
     } finally {
@@ -426,9 +440,12 @@ export function Workspace() {
           method: "POST",
           headers: { Authorization: `Bearer ${data.session?.access_token ?? ""}` },
         });
-        if (!response.ok) throw new Error("The enrichment worker could not be resumed.");
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { error?: string } | null;
+          throw new Error(body?.error ?? "The enrichment worker could not be resumed.");
+        }
         setJobs((current) => current.map((job) => job.id === activeJob.id ? { ...job, status: "running" } : job));
-        setToast(response.status === 202 ? "Job queued. The worker will begin when its secure runtime is online." : "Enrichment resumed.");
+        setToast("Worker claimed the job. Enrichment is running.");
       }
     } catch (error) {
       setToast(error instanceof Error ? error.message : "The job could not be updated.");
@@ -535,9 +552,9 @@ export function Workspace() {
           {(view === "overview" || view === "enrichment") && activeJob ? <section className="run-card">
             <div className="run-main">
               <div className="run-title"><span className="run-icon"><Globe2 size={20} /></span><div><span className="section-kicker">Active enrichment</span><h2>{activeDataset?.name ?? "Latest account job"}</h2></div></div>
-              <div className="run-stats"><strong>{isRunning ? `${runProgress}%` : activeJob?.status === "completed" ? "Done" : "Paused"}</strong><span>{runCompleted.toLocaleString()} of {runTotal.toLocaleString()} records</span></div>
+              <div className="run-stats"><strong>{jobStatusLabel}</strong><span>{runCompleted.toLocaleString()} of {runTotal.toLocaleString()} records</span></div>
               <div className="progress"><span style={{ width: `${runProgress}%` }} /></div>
-              <div className="run-foot"><span><span className={`pulse ${isRunning ? "" : "pulse-paused"}`} />{isRunning ? "Workers researching public sources" : "Workers safely paused"}</span><span>{activeJob?.rowsFailed ? `${activeJob.rowsFailed} need attention` : "Evidence retained automatically"}</span></div>
+              <div className="run-foot"><span><span className={`pulse ${isRunning ? "" : "pulse-paused"}`} />{jobStatusDetail}</span><span>{activeJob?.rowsFailed ? `${activeJob.rowsFailed} need attention` : "Evidence retained automatically"}</span></div>
             </div>
             <button className="pause-button" type="button" disabled={jobBusy} onClick={() => void toggleActiveJob()} aria-label={isRunning ? "Pause enrichment" : "Resume enrichment"}>{jobBusy ? <LoaderCircle className="spin" size={17} /> : isRunning ? <Pause size={17} /> : <Play size={17} />}</button>
           </section> : null}

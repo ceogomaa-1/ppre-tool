@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -11,6 +12,7 @@ from .supabase_rest import SupabaseRest
 
 running_jobs: set[str] = set()
 jobs_lock = asyncio.Lock()
+logger = logging.getLogger(__name__)
 
 
 def require_worker_secret(
@@ -45,9 +47,12 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "engine": "scrapling-static"}
 
 
-async def run_and_release(job_id: str) -> None:
+async def run_and_release(job: dict[str, object]) -> None:
+    job_id = str(job["id"])
     try:
-        await app.state.pipeline.run(job_id)
+        await app.state.pipeline.run_claimed(job)
+    except Exception:
+        logger.exception("Enrichment job %s failed", job_id)
     finally:
         async with jobs_lock:
             running_jobs.discard(job_id)
@@ -59,5 +64,16 @@ async def run_job(job_id: str, background: BackgroundTasks) -> dict[str, str]:
         if job_id in running_jobs:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is already running")
         running_jobs.add(job_id)
-    background.add_task(run_and_release, job_id)
-    return {"status": "accepted", "job_id": job_id}
+    try:
+        job = await app.state.pipeline.claim(job_id)
+    except ValueError as error:
+        async with jobs_lock:
+            running_jobs.discard(job_id)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except Exception as error:
+        async with jobs_lock:
+            running_jobs.discard(job_id)
+        logger.exception("Could not claim enrichment job %s", job_id)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Worker database access failed") from error
+    background.add_task(run_and_release, job)
+    return {"status": "running", "job_id": job_id}

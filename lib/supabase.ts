@@ -222,11 +222,24 @@ export async function persistDataset(dataset: ParsedDataset, leads: PropertyLead
   }).select("id").single();
   if (jobError) throw jobError;
   const { data: session } = await supabase.auth.getSession();
+  let workerStarted = false;
+  let workerError: string | null = null;
   if (session.session?.access_token) {
-    await fetch(`/api/jobs/${job.id}/run`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${session.session.access_token}` },
-    });
+    try {
+      const response = await fetch(`/api/jobs/${job.id}/run`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.session.access_token}` },
+      });
+      workerStarted = response.ok;
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null;
+        workerError = body?.error ?? "The enrichment worker could not start.";
+      }
+    } catch {
+      workerError = "The enrichment worker could not be reached.";
+    }
+  } else {
+    workerError = "Your session expired before the worker could start.";
   }
-  return { mode: "saved" as const, datasetId: created.id };
+  return { mode: "saved" as const, datasetId: created.id, workerStarted, workerError };
 }

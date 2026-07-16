@@ -51,7 +51,7 @@ class EnrichmentPipeline:
         self.discovery = DiscoveryClient(settings)
         self.scraper = PublicWebScraper(settings)
 
-    async def run(self, job_id: str) -> None:
+    async def claim(self, job_id: str) -> dict[str, Any]:
         jobs = await self.db.select("enrichment_jobs", {"id": f"eq.{job_id}", "select": "*", "limit": "1"})
         if not jobs:
             raise ValueError("Job not found")
@@ -67,7 +67,14 @@ class EnrichmentPipeline:
         )
         if not claimed:
             raise ValueError("Job was claimed by another worker")
-        await self.db.update("datasets", {"id": f"eq.{job['dataset_id']}"}, {"status": "processing", "updated_at": now})
+        return claimed[0]
+
+    async def run(self, job_id: str) -> None:
+        job = await self.claim(job_id)
+        await self.run_claimed(job)
+
+    async def run_claimed(self, job: dict[str, Any]) -> None:
+        job_id = str(job["id"])
         max_records = min(int(job.get("configuration", {}).get("max_records", 500)), 25_000)
 
         completed = int(job.get("rows_completed", 0))
@@ -77,7 +84,15 @@ class EnrichmentPipeline:
         processed_this_run = 0
 
         try:
+            now = datetime.now(UTC).isoformat()
+            await self.db.update("datasets", {"id": f"eq.{job['dataset_id']}"}, {"status": "processing", "updated_at": now})
             while processed_this_run < max_records:
+                current = await self.db.select(
+                    "enrichment_jobs",
+                    {"id": f"eq.{job_id}", "select": "status", "limit": "1"},
+                )
+                if not current or current[0]["status"] != "running":
+                    return
                 rows = await self.db.select(
                     "leads",
                     {
@@ -91,6 +106,18 @@ class EnrichmentPipeline:
                 if not rows:
                     break
                 for row in rows:
+                    current = await self.db.select(
+                        "enrichment_jobs",
+                        {"id": f"eq.{job_id}", "select": "status", "limit": "1"},
+                    )
+                    if not current or current[0]["status"] != "running":
+                        if current and current[0]["status"] == "paused":
+                            await self.db.update(
+                                "datasets",
+                                {"id": f"eq.{job['dataset_id']}"},
+                                {"status": "paused", "updated_at": datetime.now(UTC).isoformat()},
+                            )
+                        return
                     lead = Lead.model_validate(row)
                     try:
                         used_input, used_output = await self._process_lead(lead)
@@ -117,6 +144,7 @@ class EnrichmentPipeline:
             )
         except Exception:
             await self.db.update("enrichment_jobs", {"id": f"eq.{job_id}"}, {"status": "failed", "updated_at": datetime.now(UTC).isoformat()})
+            await self.db.update("datasets", {"id": f"eq.{job['dataset_id']}"}, {"status": "failed", "updated_at": datetime.now(UTC).isoformat()})
             raise
 
     async def _process_lead(self, lead: Lead) -> tuple[int, int]:

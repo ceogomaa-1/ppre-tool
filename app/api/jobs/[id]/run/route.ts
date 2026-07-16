@@ -25,13 +25,21 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
   const workerUrl = process.env.WORKER_URL;
   const workerSecret = process.env.WORKER_SHARED_SECRET;
-  if (!workerUrl || !workerSecret) return Response.json({ status: "queued", mode: "worker-not-configured" }, { status: 202 });
+  if (!workerUrl || !workerSecret) {
+    return Response.json({ error: "Enrichment worker is not configured" }, { status: 503 });
+  }
 
-  const workerResponse = await fetch(`${workerUrl.replace(/\/$/, "")}/v1/jobs/${id}/run`, {
-    method: "POST",
-    headers: { "X-Worker-Secret": workerSecret },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!workerResponse.ok) return Response.json({ error: "Worker rejected the job" }, { status: 502 });
-  return Response.json({ status: "accepted" }, { status: 202 });
+  try {
+    const workerResponse = await fetch(`${workerUrl.replace(/\/$/, "")}/v1/jobs/${id}/run`, {
+      method: "POST",
+      headers: { "X-Worker-Secret": workerSecret },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!workerResponse.ok) {
+      return Response.json({ error: "Worker could not claim the job" }, { status: 502 });
+    }
+    return Response.json({ status: "running" }, { status: 202 });
+  } catch {
+    return Response.json({ error: "Enrichment worker is unreachable" }, { status: 502 });
+  }
 }
