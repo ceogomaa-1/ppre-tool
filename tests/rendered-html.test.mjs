@@ -42,7 +42,8 @@ test("starter preview is fully removed and product capabilities are present", as
   assert.match(workspace, /exportCsv/);
   assert.match(layout, /generateMetadata/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
-  assert.match(envExample, /OPENAI_API_KEY=your_rotated_openai_key/);
+  assert.doesNotMatch(envExample, /NEXT_PUBLIC_OPENAI|OPENAI_API_KEY/);
+  assert.match(workspace, /signInWithOAuth/);
   assert.match(security, /private-network blocking|private\/reserved networks/i);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
   await access(new URL("../public/og.png", import.meta.url));

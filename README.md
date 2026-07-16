@@ -5,7 +5,7 @@ Property intelligence, with receipts. Acreline imports bulk owner/property recor
 ## What is included
 
 - A responsive Vinext/React workspace with real CSV, TSV and XLSX parsing, automatic column mapping, table search/filtering, evidence inspection and CSV export.
-- Supabase passwordless authentication, private file storage, five owner-scoped application tables, twenty row-level-security policies, and four storage policies.
+- Supabase Google OAuth and passwordless authentication, private file storage, five owner-scoped application tables, twenty row-level-security policies, and four storage policies.
 - A containerized Python enrichment worker using OpenAI Responses + web search for source discovery and Scrapling 0.4.8 for independent page verification.
 - Cost controls: deterministic spreadsheet parsing, one short AI discovery call per uncached record, low search context, low reasoning effort, compact structured output, a 30-day fingerprint cache, bounded concurrency and token accounting.
 - Safety controls: public-web-only URL validation, SSRF/private-network blocking, safe redirects, source provenance, confidence thresholds and human review states.
@@ -37,6 +37,31 @@ Python worker
 4. Set `WORKER_URL` and the same `WORKER_SHARED_SECRET` in the web runtime.
 
 The database definitions are saved under `supabase/migrations/` and have also been applied to the connected `ppre-tool` Supabase project.
+
+## Add the OpenAI API key safely
+
+The OpenAI key belongs to the Python enrichment worker—not the browser and not a `NEXT_PUBLIC_` variable.
+
+### Local worker
+
+1. Copy `enrichment-worker/.env.example` to `enrichment-worker/.env`.
+2. Open `enrichment-worker/.env`.
+3. Set `OPENAI_API_KEY` to a newly created key and keep `OPENAI_MODEL=gpt-5.6-luna`.
+4. Set `SUPABASE_SERVICE_ROLE_KEY` and a long random `WORKER_SHARED_SECRET`.
+5. Never commit this file; `.env*` is ignored.
+
+### Production worker
+
+In the hosting dashboard for the Docker/Python worker, add these server-side secrets:
+
+- `OPENAI_API_KEY`: the new OpenAI project key.
+- `SUPABASE_URL`: the connected Supabase project URL.
+- `SUPABASE_SERVICE_ROLE_KEY`: Supabase Dashboard → Project Settings → API Keys → service role.
+- `WORKER_SHARED_SECRET`: a new random value of at least 32 characters.
+
+In the Vercel web project, add only `WORKER_URL` and the matching `WORKER_SHARED_SECRET`. Do not add `OPENAI_API_KEY` to the web project because the web runtime never calls OpenAI directly.
+
+For Google sign-in, add every production and preview app URL to Supabase Authentication → URL Configuration → Redirect URLs. The Google provider itself must remain enabled in Supabase.
 
 ## Scrapling audit decision
 

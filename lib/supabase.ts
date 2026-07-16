@@ -1,7 +1,30 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { ParsedDataset, PropertyLead } from "./types";
+import type { DatasetSummary, EnrichmentJob, ParsedDataset, PropertyLead } from "./types";
 
 let client: SupabaseClient | null | undefined;
+
+type LeadRow = {
+  id: string;
+  dataset_id: string;
+  owner_name: string;
+  property_address: string | null;
+  city: string | null;
+  province: string | null;
+  postal_code: string | null;
+  property_type: string | null;
+  email: string | null;
+  phone: string | null;
+  confidence: number | string | null;
+  status: string;
+  enriched_at: string | null;
+  sources: Array<{
+    source_url: string;
+    source_domain: string;
+    title: string | null;
+    snippet: string | null;
+    captured_at: string | null;
+  }>;
+};
 
 export function getSupabaseClient() {
   if (client !== undefined) return client;
@@ -14,14 +37,24 @@ export function getSupabaseClient() {
 export async function loadPropertyLeads(): Promise<PropertyLead[]> {
   const supabase = getSupabaseClient();
   if (!supabase) return [];
-  const { data, error } = await supabase
-    .from("leads")
-    .select("*,sources(source_url,source_domain,title,snippet,captured_at)")
-    .order("created_at", { ascending: false })
-    .limit(1000);
-  if (error) throw error;
-  return (data ?? []).map((row) => ({
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) return [];
+  const rows: LeadRow[] = [];
+  const pageSize = 1000;
+  for (let from = 0; from < 25_000; from += pageSize) {
+    const { data, error } = await supabase
+      .from("leads")
+      .select("*,sources(source_url,source_domain,title,snippet,captured_at)")
+      .eq("user_id", auth.user.id)
+      .order("created_at", { ascending: false })
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    rows.push(...((data ?? []) as LeadRow[]));
+    if (!data || data.length < pageSize) break;
+  }
+  return rows.map((row) => ({
     id: row.id,
+    datasetId: row.dataset_id,
     owner: row.owner_name,
     address: row.property_address ?? "Address not provided",
     city: row.city ?? "",
@@ -33,13 +66,101 @@ export async function loadPropertyLeads(): Promise<PropertyLead[]> {
     confidence: Number(row.confidence ?? 0),
     status: row.status === "verified" ? "verified" : row.status === "researching" ? "reviewing" : row.status === "queued" ? "queued" : "attention",
     updatedAt: row.enriched_at ? new Date(row.enriched_at).toLocaleString() : "Queued",
-    sources: (row.sources ?? []).map((source: Record<string, string>) => ({
+    sources: (row.sources ?? []).map((source) => ({
       label: source.title || source.source_domain || "Public source",
       url: source.source_url,
       detail: source.snippet || "Source evidence captured",
       capturedAt: source.captured_at ? new Date(source.captured_at).toLocaleString() : "Captured",
     })),
   }));
+}
+
+export async function loadDatasets(): Promise<DatasetSummary[]> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return [];
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) return [];
+  const { data, error } = await supabase
+    .from("datasets")
+    .select("id,name,row_count,processed_count,matched_count,status,created_at")
+    .eq("user_id", auth.user.id)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    rowCount: row.row_count,
+    processedCount: row.processed_count,
+    matchedCount: row.matched_count,
+    status: row.status,
+    createdAt: new Date(row.created_at).toLocaleString(),
+  }));
+}
+
+export async function loadEnrichmentJobs(): Promise<EnrichmentJob[]> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return [];
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) return [];
+  const { data, error } = await supabase
+    .from("enrichment_jobs")
+    .select("id,dataset_id,status,rows_total,rows_completed,rows_failed,estimated_cost_usd,created_at")
+    .eq("user_id", auth.user.id)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    datasetId: row.dataset_id,
+    status: row.status,
+    rowsTotal: row.rows_total,
+    rowsCompleted: row.rows_completed,
+    rowsFailed: row.rows_failed,
+    estimatedCostUsd: Number(row.estimated_cost_usd ?? 0),
+    createdAt: new Date(row.created_at).toLocaleString(),
+  }));
+}
+
+export async function updateLeadReview(leadId: string, reviewState: "approved" | "rejected") {
+  const supabase = getSupabaseClient();
+  if (!supabase) return;
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) throw new Error("Sign in to review records.");
+  const { error } = await supabase
+    .from("leads")
+    .update({ review_state: reviewState, updated_at: new Date().toISOString() })
+    .eq("id", leadId)
+    .eq("user_id", auth.user.id);
+  if (error) throw error;
+}
+
+export async function updateEnrichmentJob(jobId: string, status: "running" | "paused" | "cancelled") {
+  const supabase = getSupabaseClient();
+  if (!supabase) return;
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) throw new Error("Sign in to manage enrichment jobs.");
+  const { error } = await supabase
+    .from("enrichment_jobs")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", jobId)
+    .eq("user_id", auth.user.id);
+  if (error) throw error;
+}
+
+export async function deleteDataset(datasetId: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return;
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) throw new Error("Sign in to manage datasets.");
+  const { data: dataset, error: readError } = await supabase
+    .from("datasets")
+    .select("storage_path")
+    .eq("id", datasetId)
+    .eq("user_id", auth.user.id)
+    .single();
+  if (readError) throw readError;
+  if (dataset.storage_path) await supabase.storage.from("imports").remove([dataset.storage_path]);
+  const { error } = await supabase.from("datasets").delete().eq("id", datasetId).eq("user_id", auth.user.id);
+  if (error) throw error;
 }
 
 export async function persistDataset(dataset: ParsedDataset, leads: PropertyLead[]) {

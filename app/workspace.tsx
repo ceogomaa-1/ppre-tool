@@ -21,8 +21,9 @@ import {
   Link2,
   ListFilter,
   LoaderCircle,
+  LockKeyhole,
+  LogOut,
   Mail,
-  MoreHorizontal,
   Pause,
   Phone,
   Play,
@@ -31,24 +32,47 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UploadCloud,
   UserRound,
   UsersRound,
   WandSparkles,
   X,
 } from "lucide-react";
+import type { User } from "@supabase/supabase-js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { datasetToLeads, parseDataset } from "@/lib/import-dataset";
 import { sampleLeads } from "@/lib/sample-data";
-import { getSupabaseClient, loadPropertyLeads, persistDataset } from "@/lib/supabase";
-import type { LeadStatus, ParsedDataset, PropertyLead } from "@/lib/types";
+import {
+  deleteDataset,
+  getSupabaseClient,
+  loadDatasets,
+  loadEnrichmentJobs,
+  loadPropertyLeads,
+  persistDataset,
+  updateEnrichmentJob,
+  updateLeadReview,
+} from "@/lib/supabase";
+import type { DatasetSummary, EnrichmentJob, LeadStatus, ParsedDataset, PropertyLead } from "@/lib/types";
 
-const nav = [
-  { label: "Overview", icon: Gauge, active: true },
-  { label: "Enrichment", icon: WandSparkles, count: 18 },
-  { label: "Datasets", icon: Database },
-  { label: "Exports", icon: ArrowDownToLine },
+type View = "overview" | "enrichment" | "datasets" | "exports" | "team" | "settings";
+type AuthState = "idle" | "sending" | "oauth" | "sent" | "error";
+
+const nav: Array<{ id: View; label: string; icon: typeof Gauge }> = [
+  { id: "overview", label: "Overview", icon: Gauge },
+  { id: "enrichment", label: "Enrichment", icon: WandSparkles },
+  { id: "datasets", label: "Datasets", icon: Database },
+  { id: "exports", label: "Exports", icon: ArrowDownToLine },
 ];
+
+const viewCopy: Record<View, { eyebrow: string; title: string; accent: string; copy: string }> = {
+  overview: { eyebrow: "Live workspace", title: "Property intelligence,", accent: "with receipts.", copy: "Turn raw owner records into verified contacts with confidence scores and a source trail your team can trust." },
+  enrichment: { eyebrow: "Research operations", title: "Enrichment jobs,", accent: "under control.", copy: "Monitor active research, inspect uncertain matches, and keep every result tied to public evidence." },
+  datasets: { eyebrow: "Source library", title: "Every import,", accent: "right where you left it.", copy: "Your private spreadsheets and their processing history stay attached to your account." },
+  exports: { eyebrow: "Export centre", title: "Clean results,", accent: "ready to move.", copy: "Filter, select, and export only the records you need—with evidence URLs included." },
+  team: { eyebrow: "Access control", title: "Your workspace,", accent: "yours alone.", copy: "This release uses personal workspaces. Every database row and uploaded file is scoped to the signed-in user." },
+  settings: { eyebrow: "Account settings", title: "Simple controls,", accent: "serious privacy.", copy: "Review your active identity, data boundary, and session controls." },
+};
 
 const statusMeta: Record<LeadStatus, { label: string; tone: string }> = {
   verified: { label: "Verified", tone: "green" },
@@ -62,9 +86,9 @@ function initials(value: string) {
 }
 
 function safeCsvCell(value: unknown) {
-  let text = String(value ?? "");
-  if (/^[=+\-@]/.test(text)) text = `'${text}`;
-  return `"${text.replaceAll('"', '""')}"`;
+  let valueText = String(value ?? "");
+  if (/^[=+\-@]/.test(valueText)) valueText = `'${valueText}`;
+  return `"${valueText.replaceAll('"', '""')}"`;
 }
 
 function StatusBadge({ status }: { status: LeadStatus }) {
@@ -77,7 +101,7 @@ function Confidence({ value }: { value: number }) {
   return (
     <div className="confidence" aria-label={`${value}% confidence`}>
       <div className={`confidence-ring confidence-${tone}`} style={{ "--score": `${value * 3.6}deg` } as React.CSSProperties}>
-        <span>{value ? `${value}` : "—"}</span>
+        <span>{value || "—"}</span>
       </div>
       <div><strong>{value ? `${value}%` : "Pending"}</strong><small>confidence</small></div>
     </div>
@@ -89,48 +113,87 @@ function MetricCard({ label, value, detail, icon: Icon, tone }: { label: string;
     <article className="metric-card">
       <div className={`metric-icon metric-${tone}`}><Icon size={18} strokeWidth={1.9} /></div>
       <div className="metric-copy"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
-      <MoreHorizontal className="metric-more" size={18} />
     </article>
   );
 }
 
 export function Workspace() {
-  const [leads, setLeads] = useState(sampleLeads);
-  const [selected, setSelected] = useState<PropertyLead | null>(sampleLeads[0]);
+  const [view, setView] = useState<View>("overview");
+  const [user, setUser] = useState<User | null>(null);
+  const [accountLoading, setAccountLoading] = useState(true);
+  const [leads, setLeads] = useState<PropertyLead[]>(sampleLeads);
+  const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
+  const [jobs, setJobs] = useState<EnrichmentJob[]>([]);
+  const [selected, setSelected] = useState<PropertyLead | null>(null);
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
+  const [approvedLeadIds, setApprovedLeadIds] = useState<Set<string>>(new Set());
+  const [datasetFilter, setDatasetFilter] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | LeadStatus>("all");
+  const [page, setPage] = useState(0);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [email, setEmail] = useState("");
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [authState, setAuthState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [authState, setAuthState] = useState<AuthState>("idle");
   const [parsed, setParsed] = useState<ParsedDataset | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [importState, setImportState] = useState<"idle" | "parsing" | "saving">("idle");
   const [toast, setToast] = useState<string | null>(null);
-  const [running, setRunning] = useState(true);
+  const [demoRunning, setDemoRunning] = useState(true);
+  const [jobBusy, setJobBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  const refreshWorkspace = useCallback(async (activeUser: User) => {
+    const [savedLeads, savedDatasets, savedJobs] = await Promise.all([
+      loadPropertyLeads(),
+      loadDatasets(),
+      loadEnrichmentJobs(),
+    ]);
+    setUser(activeUser);
+    setLeads(savedLeads);
+    setDatasets(savedDatasets);
+    setJobs(savedJobs);
+    setSelected((current) => savedLeads.find((lead) => lead.id === current?.id) ?? savedLeads[0] ?? null);
+  }, []);
 
   useEffect(() => {
     const supabase = getSupabaseClient();
-    if (!supabase) return;
-    const hydrate = async (activeEmail?: string | null) => {
-      setUserEmail(activeEmail ?? null);
-      if (!activeEmail) return;
+    if (!supabase) {
+      window.setTimeout(() => setAccountLoading(false), 0);
+      return;
+    }
+    const hydrate = async (activeUser: User | null) => {
+      setAccountLoading(true);
+      if (!activeUser) {
+        setUser(null);
+        setLeads(sampleLeads);
+        setDatasets([]);
+        setJobs([]);
+        setSelected(null);
+        setSelectedLeadIds(new Set());
+        setDatasetFilter(null);
+        setAccountLoading(false);
+        return;
+      }
       try {
-        const savedLeads = await loadPropertyLeads();
-        if (savedLeads.length) {
-          setLeads(savedLeads);
-          setSelected(savedLeads[0]);
-        }
+        await refreshWorkspace(activeUser);
       } catch {
-        setToast("Your saved records could not be refreshed. The preview remains available.");
+        setLeads([]);
+        setDatasets([]);
+        setJobs([]);
+        setSelected(null);
+        setToast("We could not refresh your workspace. Your data remains safely stored.");
+      } finally {
+        setAccountLoading(false);
       }
     };
-    supabase.auth.getUser().then(({ data }) => void hydrate(data.user?.email));
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => void hydrate(session?.user.email));
+    void supabase.auth.getUser().then(({ data }) => hydrate(data.user));
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      window.setTimeout(() => void hydrate(session?.user ?? null), 0);
+    });
     return () => data.subscription.unsubscribe();
-  }, []);
+  }, [refreshWorkspace]);
 
   useEffect(() => {
     if (!toast) return;
@@ -139,26 +202,55 @@ export function Workspace() {
   }, [toast]);
 
   useEffect(() => {
-    if (!userEmail) return;
-    const timer = window.setInterval(() => {
-      void loadPropertyLeads().then((savedLeads) => {
-        if (savedLeads.length) {
-          setLeads(savedLeads);
-          setSelected((current) => savedLeads.find((lead) => lead.id === current?.id) ?? current);
-        }
-      }).catch(() => undefined);
-    }, 15_000);
+    if (!user) return;
+    const timer = window.setInterval(() => void refreshWorkspace(user).catch(() => undefined), 15_000);
     return () => window.clearInterval(timer);
-  }, [userEmail]);
+  }, [refreshWorkspace, user]);
 
-  const visibleLeads = useMemo(() => {
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        document.getElementById("record-search")?.focus();
+      }
+      if (event.key === "Escape") {
+        setUploadOpen(false);
+        setAuthOpen(false);
+        setNotificationsOpen(false);
+        setSelected(null);
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
+
+  const displayName = user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email?.split("@")[0] || "Avery Morgan";
+  const avatarText = initials(displayName) || "AM";
+  const pendingCount = leads.filter((lead) => lead.status === "queued" || lead.status === "reviewing" || lead.status === "attention").length;
+  const verifiedCount = leads.filter((lead) => lead.status === "verified").length;
+  const avgConfidence = leads.length ? leads.reduce((sum, lead) => sum + lead.confidence, 0) / leads.length : 0;
+  const activeJob = jobs.find((job) => ["running", "paused", "queued"].includes(job.status)) ?? jobs[0] ?? null;
+  const activeDataset = activeJob ? datasets.find((dataset) => dataset.id === activeJob.datasetId) : null;
+  const runTotal = activeJob?.rowsTotal ?? (user ? 0 : 12_842);
+  const runCompleted = activeJob?.rowsCompleted ?? (user ? 0 : 8_216);
+  const runProgress = runTotal ? Math.min(100, Math.round((runCompleted / runTotal) * 100)) : 0;
+  const isRunning = activeJob ? activeJob.status === "running" : demoRunning;
+
+  const filteredLeads = useMemo(() => {
     const needle = search.toLowerCase().trim();
     return leads.filter((lead) => {
+      const matchesDataset = !datasetFilter || lead.datasetId === datasetFilter;
+      const matchesView = view !== "enrichment" || lead.status !== "verified";
       const matchesFilter = filter === "all" || lead.status === filter;
       const haystack = `${lead.owner} ${lead.address} ${lead.city} ${lead.email ?? ""} ${lead.phone ?? ""}`.toLowerCase();
-      return matchesFilter && (!needle || haystack.includes(needle));
+      return matchesDataset && matchesView && matchesFilter && (!needle || haystack.includes(needle));
     });
-  }, [filter, leads, search]);
+  }, [datasetFilter, filter, leads, search, view]);
+
+  const pageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const pageLeads = filteredLeads.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
   const handleFile = useCallback(async (file?: File) => {
     if (!file) return;
@@ -176,17 +268,22 @@ export function Workspace() {
 
   async function startImport() {
     if (!parsed) return;
-    const imported = datasetToLeads(parsed);
+    if (!user) {
+      setUploadOpen(false);
+      setAuthOpen(true);
+      setToast("Sign in first so this dataset is saved to your private workspace.");
+      return;
+    }
     setImportState("saving");
+    setParseError(null);
     try {
-      const result = await persistDataset(parsed, imported);
-      setLeads((current) => [...imported, ...current]);
-      setSelected(imported[0] ?? null);
+      const imported = datasetToLeads(parsed);
+      await persistDataset(parsed, imported);
+      await refreshWorkspace(user);
       setUploadOpen(false);
       setParsed(null);
-      setToast(result.mode === "saved"
-        ? `${imported.length.toLocaleString()} records saved and queued for enrichment.`
-        : `${imported.length.toLocaleString()} records loaded in preview mode. Sign in to save them.`);
+      setView("enrichment");
+      setToast(`${imported.length.toLocaleString()} records saved and queued for enrichment.`);
     } catch (error) {
       setParseError(error instanceof Error ? error.message : "The dataset could not be saved.");
     } finally {
@@ -194,9 +291,14 @@ export function Workspace() {
     }
   }
 
-  function exportCsv() {
+  function exportCsv(scope: PropertyLead[] = filteredLeads) {
+    const chosen = selectedLeadIds.size ? scope.filter((lead) => selectedLeadIds.has(lead.id)) : scope;
+    if (!chosen.length) {
+      setToast("There are no records to export in this view.");
+      return;
+    }
     const headers = ["Owner", "Property address", "City", "Province", "Postal code", "Email", "Phone", "Property type", "Confidence", "Status", "Source URLs"];
-    const body = visibleLeads.map((lead) => [
+    const body = chosen.map((lead) => [
       lead.owner, lead.address, lead.city, lead.province, lead.postalCode, lead.email, lead.phone,
       lead.propertyType, lead.confidence, statusMeta[lead.status].label, lead.sources.map((source) => source.url).join(" | "),
     ].map(safeCsvCell).join(","));
@@ -207,7 +309,7 @@ export function Workspace() {
     anchor.download = `acreline-enrichment-${new Date().toISOString().slice(0, 10)}.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
-    setToast(`Exported ${visibleLeads.length} source-backed records.`);
+    setToast(`Exported ${chosen.length.toLocaleString()} source-backed records.`);
   }
 
   async function sendMagicLink(event: React.FormEvent) {
@@ -222,157 +324,204 @@ export function Workspace() {
     setAuthState(error ? "error" : "sent");
   }
 
+  async function signInWithGoogle() {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      setAuthState("error");
+      return;
+    }
+    setAuthState("oauth");
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) {
+      setAuthState("error");
+      setToast(error.message);
+    }
+  }
+
+  async function signOut() {
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setAuthOpen(false);
+    setToast("Signed out. Your private workspace is still safely stored.");
+  }
+
+  async function toggleActiveJob() {
+    if (!user || !activeJob) {
+      setDemoRunning((current) => !current);
+      setToast(demoRunning ? "Preview enrichment paused." : "Preview enrichment resumed.");
+      return;
+    }
+    setJobBusy(true);
+    try {
+      if (activeJob.status === "running") {
+        await updateEnrichmentJob(activeJob.id, "paused");
+        setJobs((current) => current.map((job) => job.id === activeJob.id ? { ...job, status: "paused" } : job));
+        setToast("Enrichment paused after the current record.");
+      } else {
+        const supabase = getSupabaseClient();
+        const { data } = await supabase!.auth.getSession();
+        const response = await fetch(`/api/jobs/${activeJob.id}/run`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${data.session?.access_token ?? ""}` },
+        });
+        if (!response.ok) throw new Error("The enrichment worker could not be resumed.");
+        setJobs((current) => current.map((job) => job.id === activeJob.id ? { ...job, status: "running" } : job));
+        setToast(response.status === 202 ? "Job queued. The worker will begin when its secure runtime is online." : "Enrichment resumed.");
+      }
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The job could not be updated.");
+    } finally {
+      setJobBusy(false);
+    }
+  }
+
+  async function approveSelectedRecord() {
+    if (!selected) return;
+    try {
+      if (user) await updateLeadReview(selected.id, "approved");
+      setApprovedLeadIds((current) => new Set(current).add(selected.id));
+      setToast(`${selected.owner} approved.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The review could not be saved.");
+    }
+  }
+
+  async function removeDataset(dataset: DatasetSummary) {
+    if (!window.confirm(`Delete "${dataset.name}" and every related record? This cannot be undone.`)) return;
+    try {
+      await deleteDataset(dataset.id);
+      if (user) await refreshWorkspace(user);
+      setDatasetFilter(null);
+      setToast(`${dataset.name} deleted.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The dataset could not be deleted.");
+    }
+  }
+
+  function switchView(nextView: View) {
+    setView(nextView);
+    setPage(0);
+    setNotificationsOpen(false);
+    if (nextView !== "overview" && nextView !== "exports") setDatasetFilter(null);
+  }
+
+  const copy = viewCopy[view];
+  const showRecords = view === "overview" || view === "enrichment" || view === "exports";
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><div className="brand-mark"><Layers3 size={19} strokeWidth={2.4} /></div><span>Acreline</span></div>
         <nav aria-label="Primary navigation">
           <p className="nav-label">Workspace</p>
-          {nav.map(({ label, icon: Icon, active, count }) => (
-            <button key={label} className={`nav-item ${active ? "nav-active" : ""}`} type="button">
-              <Icon size={18} strokeWidth={1.9} /><span>{label}</span>{count ? <b>{count}</b> : null}
+          {nav.map(({ id, label, icon: Icon }) => (
+            <button key={id} className={`nav-item ${view === id ? "nav-active" : ""}`} type="button" onClick={() => switchView(id)}>
+              <Icon size={18} strokeWidth={1.9} /><span>{label}</span>{id === "enrichment" && pendingCount ? <b>{pendingCount}</b> : null}
             </button>
           ))}
           <p className="nav-label nav-section">Manage</p>
-          <button className="nav-item" type="button"><UsersRound size={18} /><span>Team</span></button>
-          <button className="nav-item" type="button"><Settings2 size={18} /><span>Settings</span></button>
+          <button className={`nav-item ${view === "team" ? "nav-active" : ""}`} type="button" onClick={() => switchView("team")}><UsersRound size={18} /><span>Team</span></button>
+          <button className={`nav-item ${view === "settings" ? "nav-active" : ""}`} type="button" onClick={() => switchView("settings")}><Settings2 size={18} /><span>Settings</span></button>
         </nav>
         <div className="sidebar-spacer" />
         <div className="privacy-card">
           <ShieldCheck size={18} />
-          <div><strong>Public-web only</strong><span>Every finding includes its source and capture time.</span></div>
+          <div><strong>Private by default</strong><span>RLS isolates every record and source by user ID.</span></div>
         </div>
         <button className="profile" type="button" onClick={() => setAuthOpen(true)}>
-          <span className="profile-avatar">AM</span>
-          <span><strong>{userEmail ? userEmail.split("@")[0] : "Avery Morgan"}</strong><small>{userEmail ?? "Demo workspace"}</small></span>
+          <span className="profile-avatar">{avatarText}</span>
+          <span><strong>{displayName}</strong><small>{user?.email ?? "Demo workspace"}</small></span>
           <ChevronDown size={15} />
         </button>
       </aside>
 
       <main className="main">
         <header className="topbar">
-          <div><p>Property Partners</p><span>/</span><strong>Owner intelligence</strong></div>
+          <div><p>Property Partners</p><span>/</span><strong>{nav.find((item) => item.id === view)?.label ?? viewCopy[view].eyebrow}</strong></div>
           <div className="top-actions">
-            <button className="command-search" type="button" onClick={() => document.getElementById("record-search")?.focus()}>
+            <button className="command-search" type="button" onClick={() => { if (!showRecords) setView("overview"); window.setTimeout(() => document.getElementById("record-search")?.focus(), 0); }}>
               <Search size={15} /><span>Search workspace</span><kbd><Command size={11} /> K</kbd>
             </button>
-            <button className="icon-button" type="button" aria-label="Notifications"><Bell size={18} /><i /></button>
-            <button className="avatar-button" type="button" onClick={() => setAuthOpen(true)} aria-label="Open account">AM</button>
+            <div className="notification-wrap">
+              <button className="icon-button" type="button" aria-label="Notifications" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((current) => !current)}><Bell size={18} />{pendingCount ? <i /> : null}</button>
+              {notificationsOpen ? <div className="notifications-panel"><div><strong>Workspace activity</strong><button type="button" onClick={() => setNotificationsOpen(false)} aria-label="Close notifications"><X size={15} /></button></div>{user ? jobs.slice(0, 3).map((job) => <button type="button" key={job.id} onClick={() => { setView("enrichment"); setNotificationsOpen(false); }}><span className={`activity-dot activity-${job.status}`} /><span><strong>{job.status === "completed" ? "Enrichment completed" : `Job ${job.status}`}</strong><small>{job.rowsCompleted.toLocaleString()} of {job.rowsTotal.toLocaleString()} records · {job.createdAt}</small></span></button>) : <p>Sign in to see private job activity.</p>}{user && !jobs.length ? <p>No job activity yet.</p> : null}</div> : null}
+            </div>
+            <button className="avatar-button" type="button" onClick={() => setAuthOpen(true)} aria-label="Open account">{avatarText}</button>
           </div>
         </header>
 
         <div className="content">
           <section className="page-heading">
-            <div><div className="eyebrow"><span className="live-dot" />Live workspace</div><h1>Property intelligence,<br /><em>with receipts.</em></h1><p>Turn raw owner records into verified contacts with confidence scores and a source trail your team can trust.</p></div>
+            <div><div className="eyebrow"><span className="live-dot" />{copy.eyebrow}</div><h1>{copy.title}<br /><em>{copy.accent}</em></h1><p>{copy.copy}</p></div>
             <div className="heading-actions">
-              <button className="button secondary" type="button" onClick={exportCsv}><ArrowDownToLine size={17} />Export</button>
-              <button className="button primary" type="button" onClick={() => setUploadOpen(true)}><Plus size={18} />New enrichment</button>
+              {showRecords ? <button className="button secondary" type="button" onClick={() => exportCsv()}><ArrowDownToLine size={17} />{selectedLeadIds.size ? `Export ${selectedLeadIds.size}` : "Export"}</button> : null}
+              {view !== "team" && view !== "settings" ? <button className="button primary" type="button" onClick={() => setUploadOpen(true)}><Plus size={18} />New enrichment</button> : null}
             </div>
           </section>
 
-          <section className="metrics" aria-label="Workspace metrics">
-            <MetricCard label="Records processed" value="12,842" detail="+2,406 this week" icon={FileCheck2} tone="violet" />
-            <MetricCard label="Verified contacts" value="8,974" detail="69.9% match rate" icon={BadgeCheck} tone="green" />
-            <MetricCard label="Avg. confidence" value="87.4%" detail="+4.2 points" icon={Activity} tone="blue" />
-            <MetricCard label="Est. cost / record" value="$0.014" detail="31% under target" icon={Sparkles} tone="amber" />
-          </section>
+          {view === "overview" ? <section className="metrics" aria-label="Workspace metrics">
+            <MetricCard label="Records processed" value={leads.length.toLocaleString()} detail={user ? `${datasets.length} private datasets` : "Interactive preview data"} icon={FileCheck2} tone="violet" />
+            <MetricCard label="Verified contacts" value={verifiedCount.toLocaleString()} detail={leads.length ? `${Math.round((verifiedCount / leads.length) * 100)}% match rate` : "No records yet"} icon={BadgeCheck} tone="green" />
+            <MetricCard label="Avg. confidence" value={leads.length ? `${avgConfidence.toFixed(1)}%` : "—"} detail="Across visible account data" icon={Activity} tone="blue" />
+            <MetricCard label="Est. AI cost" value={jobs.length ? `$${jobs.reduce((sum, job) => sum + job.estimatedCostUsd, 0).toFixed(2)}` : "$0.00"} detail="Cached results reduce repeat spend" icon={Sparkles} tone="amber" />
+          </section> : null}
 
-          <section className="run-card">
+          {(view === "overview" || view === "enrichment") && (activeJob || !user) ? <section className="run-card">
             <div className="run-main">
-              <div className="run-title">
-                <span className="run-icon"><Globe2 size={20} /></span>
-                <div><span className="section-kicker">Active enrichment</span><h2>Toronto owner portfolio — July</h2></div>
-              </div>
-              <div className="run-stats"><strong>{running ? "64%" : "Paused"}</strong><span>8,216 of 12,842 records</span></div>
-              <div className="progress"><span style={{ width: running ? "64%" : "64%" }} /></div>
-              <div className="run-foot"><span><span className={`pulse ${running ? "" : "pulse-paused"}`} />{running ? "12 workers researching public sources" : "Workers safely paused"}</span><span>~38 min remaining</span></div>
+              <div className="run-title"><span className="run-icon"><Globe2 size={20} /></span><div><span className="section-kicker">Active enrichment</span><h2>{activeDataset?.name ?? (user ? "Latest account job" : "Toronto owner portfolio — preview")}</h2></div></div>
+              <div className="run-stats"><strong>{isRunning ? `${runProgress}%` : activeJob?.status === "completed" ? "Done" : "Paused"}</strong><span>{runCompleted.toLocaleString()} of {runTotal.toLocaleString()} records</span></div>
+              <div className="progress"><span style={{ width: `${runProgress}%` }} /></div>
+              <div className="run-foot"><span><span className={`pulse ${isRunning ? "" : "pulse-paused"}`} />{isRunning ? "Workers researching public sources" : "Workers safely paused"}</span><span>{activeJob?.rowsFailed ? `${activeJob.rowsFailed} need attention` : "Evidence retained automatically"}</span></div>
             </div>
-            <button className="pause-button" type="button" onClick={() => setRunning((value) => !value)} aria-label={running ? "Pause enrichment" : "Resume enrichment"}>
-              {running ? <Pause size={17} /> : <Play size={17} />}
-            </button>
-          </section>
+            <button className="pause-button" type="button" disabled={jobBusy} onClick={() => void toggleActiveJob()} aria-label={isRunning ? "Pause enrichment" : "Resume enrichment"}>{jobBusy ? <LoaderCircle className="spin" size={17} /> : isRunning ? <Pause size={17} /> : <Play size={17} />}</button>
+          </section> : null}
 
-          <section className="records-card">
+          {view === "datasets" ? <section className="workspace-panel">
+            <div className="panel-title"><div><span>Private source library</span><h2>{datasets.length ? `${datasets.length} saved dataset${datasets.length === 1 ? "" : "s"}` : "No datasets yet"}</h2></div><Database size={22} /></div>
+            {!user ? <div className="panel-empty"><LockKeyhole size={25} /><strong>Sign in to open your private dataset library.</strong><span>Demo records never mix with account data.</span><button className="button primary" type="button" onClick={() => setAuthOpen(true)}>Sign in</button></div> : datasets.length ? <div className="dataset-list">{datasets.map((dataset) => <article key={dataset.id}><div className="dataset-icon"><FileSpreadsheet size={20} /></div><div><strong>{dataset.name}</strong><span>{dataset.rowCount.toLocaleString()} rows · {dataset.status} · {dataset.createdAt}</span><div className="dataset-progress"><span style={{ width: `${dataset.rowCount ? Math.round((dataset.processedCount / dataset.rowCount) * 100) : 0}%` }} /></div></div><div className="dataset-actions"><button type="button" onClick={() => { setDatasetFilter(dataset.id); setView("overview"); setToast(`Showing records from ${dataset.name}.`); }}>View records</button><button className="danger-button" type="button" onClick={() => void removeDataset(dataset)} aria-label={`Delete ${dataset.name}`}><Trash2 size={15} /></button></div></article>)}</div> : <div className="panel-empty"><FileSpreadsheet size={25} /><strong>Your first dataset starts here.</strong><span>Upload CSV, TSV, or XLSX. It will remain available whenever you return.</span><button className="button primary" type="button" onClick={() => setUploadOpen(true)}>Import spreadsheet</button></div>}
+          </section> : null}
+
+          {view === "team" ? <section className="workspace-panel">
+            <div className="panel-title"><div><span>Personal workspace</span><h2>One identity. One private data boundary.</h2></div><UsersRound size={22} /></div>
+            <div className="privacy-grid"><article><ShieldCheck size={22} /><strong>Row-level isolation</strong><span>Every query is constrained by the authenticated Supabase user ID, with RLS enforcing the same rule in the database.</span></article><article><LockKeyhole size={22} /><strong>Private file storage</strong><span>Imported files live in a private bucket under your account ID. Other users cannot list, read, update, or delete them.</span></article><article><BadgeCheck size={22} /><strong>Persistent sessions</strong><span>Google or email sign-in restores your datasets, leads, sources, reviews, jobs, and exports when you come back.</span></article></div>
+          </section> : null}
+
+          {view === "settings" ? <section className="workspace-panel">
+            <div className="panel-title"><div><span>Account</span><h2>{user ? displayName : "Demo workspace"}</h2></div><Settings2 size={22} /></div>
+            <div className="settings-list"><div><span className="settings-avatar">{avatarText}</span><div><strong>{user?.email ?? "Not signed in"}</strong><span>{user ? "Authenticated private workspace" : "Preview records are not saved"}</span></div></div><div><ShieldCheck size={19} /><div><strong>Data isolation</strong><span>{user ? "RLS and private Storage policies are active for this account." : "Sign in before importing real client information."}</span></div></div></div>
+            <div className="settings-actions">{user ? <><button className="button secondary" type="button" onClick={() => exportCsv(leads)}><ArrowDownToLine size={17} />Export all my data</button><button className="button danger" type="button" onClick={() => void signOut()}><LogOut size={17} />Sign out</button></> : <button className="button primary" type="button" onClick={() => setAuthOpen(true)}>Sign in to Acreline</button>}</div>
+          </section> : null}
+
+          {showRecords ? <section className="records-card">
             <div className="records-head">
-              <div><h2>Owner records</h2><span>{leads.length.toLocaleString()} in this view</span></div>
-              <div className="records-tools">
-                <label className="table-search"><Search size={15} /><input id="record-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search owners, addresses, contacts…" /></label>
-                <div className="filter-wrap"><ListFilter size={15} /><select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)} aria-label="Filter records"><option value="all">All records</option><option value="verified">Verified</option><option value="reviewing">Researching</option><option value="queued">Queued</option><option value="attention">Needs review</option></select></div>
-              </div>
+              <div><h2>{datasetFilter ? datasets.find((dataset) => dataset.id === datasetFilter)?.name ?? "Dataset records" : view === "exports" ? "Exportable records" : "Owner records"}</h2><span>{filteredLeads.length.toLocaleString()} in this view{datasetFilter ? <button type="button" className="clear-filter" onClick={() => setDatasetFilter(null)}>Clear dataset</button> : null}</span></div>
+              <div className="records-tools"><label className="table-search"><Search size={15} /><input id="record-search" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Search owners, addresses, contacts…" /></label><div className="filter-wrap"><ListFilter size={15} /><select value={filter} onChange={(event) => { setFilter(event.target.value as typeof filter); setPage(0); }} aria-label="Filter records"><option value="all">All records</option><option value="verified">Verified</option><option value="reviewing">Researching</option><option value="queued">Queued</option><option value="attention">Needs review</option></select></div></div>
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th><span className="fake-check" /></th><th>Owner & property</th><th>Contact found</th><th>Confidence</th><th>Status</th><th>Sources</th><th /></tr></thead>
-                <tbody>
-                  {visibleLeads.map((lead) => (
-                    <tr key={lead.id} onClick={() => setSelected(lead)} className={selected?.id === lead.id ? "row-selected" : ""}>
-                      <td><span className="fake-check" /></td>
-                      <td><div className="owner-cell"><span className="owner-avatar">{initials(lead.owner)}</span><div><strong>{lead.owner}</strong><span>{lead.address}{lead.city ? ` · ${lead.city}` : ""}</span></div></div></td>
-                      <td><div className="contact-cell">{lead.email ? <span><Mail size={13} />{lead.email}</span> : null}{lead.phone ? <span><Phone size={13} />{lead.phone}</span> : null}{!lead.email && !lead.phone ? <span className="muted-contact">Not found yet</span> : null}</div></td>
-                      <td><Confidence value={lead.confidence} /></td>
-                      <td><StatusBadge status={lead.status} /></td>
-                      <td><div className="source-stack">{lead.sources.slice(0, 3).map((source) => <span key={source.label} title={source.label}>{source.label[0]}</span>)}{lead.sources.length ? <small>{lead.sources.length}</small> : <small>—</small>}</div></td>
-                      <td><button className="row-action" type="button" aria-label={`Open ${lead.owner}`}><ArrowRight size={16} /></button></td>
-                    </tr>
-                  ))}
-                </tbody>
+                <thead><tr><th><input type="checkbox" aria-label="Select this page" checked={pageLeads.length > 0 && pageLeads.every((lead) => selectedLeadIds.has(lead.id))} onChange={(event) => setSelectedLeadIds((current) => { const next = new Set(current); pageLeads.forEach((lead) => { if (event.target.checked) next.add(lead.id); else next.delete(lead.id); }); return next; })} /></th><th>Owner & property</th><th>Contact found</th><th>Confidence</th><th>Status</th><th>Sources</th><th /></tr></thead>
+                <tbody>{pageLeads.map((lead) => <tr key={lead.id} onClick={() => setSelected(lead)} className={selected?.id === lead.id ? "row-selected" : ""}><td><input type="checkbox" aria-label={`Select ${lead.owner}`} checked={selectedLeadIds.has(lead.id)} onClick={(event) => event.stopPropagation()} onChange={(event) => setSelectedLeadIds((current) => { const next = new Set(current); if (event.target.checked) next.add(lead.id); else next.delete(lead.id); return next; })} /></td><td><div className="owner-cell"><span className="owner-avatar">{initials(lead.owner)}</span><div><strong>{lead.owner}</strong><span>{lead.address}{lead.city ? ` · ${lead.city}` : ""}</span></div></div></td><td><div className="contact-cell">{lead.email ? <span><Mail size={13} />{lead.email}</span> : null}{lead.phone ? <span><Phone size={13} />{lead.phone}</span> : null}{!lead.email && !lead.phone ? <span className="muted-contact">Not found yet</span> : null}</div></td><td><Confidence value={lead.confidence} /></td><td><StatusBadge status={lead.status} /></td><td><div className="source-stack">{lead.sources.slice(0, 3).map((source) => <span key={source.url} title={source.label}>{source.label[0]}</span>)}{lead.sources.length ? <small>{lead.sources.length}</small> : <small>—</small>}</div></td><td><button className="row-action" type="button" aria-label={`Open ${lead.owner}`} onClick={(event) => { event.stopPropagation(); setSelected(lead); }}><ArrowRight size={16} /></button></td></tr>)}</tbody>
               </table>
-              {!visibleLeads.length ? <div className="empty-table"><Inbox size={26} /><strong>No matching records</strong><span>Try a different search or filter.</span></div> : null}
+              {!pageLeads.length ? <div className="empty-table"><Inbox size={26} /><strong>{accountLoading ? "Loading your workspace…" : user ? "No matching records" : "No matching preview records"}</strong><span>{user && !leads.length ? "Import a spreadsheet to begin." : "Try a different search or filter."}</span></div> : null}
             </div>
-            <div className="table-foot"><span>Showing {visibleLeads.length} of {leads.length}</span><div><button type="button" disabled>Previous</button><button type="button">Next</button></div></div>
-          </section>
+            <div className="table-foot"><span>Showing {pageLeads.length ? safePage * pageSize + 1 : 0}–{Math.min((safePage + 1) * pageSize, filteredLeads.length)} of {filteredLeads.length}</span><div><button type="button" disabled={safePage === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>Previous</button><button type="button" disabled={safePage >= pageCount - 1} onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}>Next</button></div></div>
+          </section> : null}
 
-          <section className="principles">
-            <ShieldCheck size={18} /><p><strong>Built for responsible research.</strong> Acreline blocks private-network targets, honors workspace allowlists, keeps source URLs, and routes uncertain identity matches to a human.</p><a href="https://github.com/D4Vinci/Scrapling" target="_blank" rel="noreferrer">Scraping engine <ArrowRight size={13} /></a>
-          </section>
+          <section className="principles"><ShieldCheck size={18} /><p><strong>Built for responsible research.</strong> Acreline blocks private-network targets, retains source URLs, and routes uncertain identity matches to a human.</p><a href="https://github.com/D4Vinci/Scrapling" target="_blank" rel="noreferrer">Scraping engine <ArrowRight size={13} /></a></section>
         </div>
       </main>
 
-      {selected ? (
-        <aside className="detail-panel" aria-label="Record detail">
-          <div className="detail-top"><span>Record intelligence</span><button type="button" onClick={() => setSelected(null)} aria-label="Close detail"><X size={18} /></button></div>
-          <div className="detail-identity"><span className="detail-avatar">{initials(selected.owner)}</span><div><h2>{selected.owner}</h2><p>{selected.address}<br />{[selected.city, selected.province, selected.postalCode].filter(Boolean).join(", ")}</p></div></div>
-          <div className="detail-score"><div><span>Identity confidence</span><strong>{selected.confidence || "—"}<small>{selected.confidence ? "%" : ""}</small></strong></div><div className="score-track"><span style={{ width: `${selected.confidence}%` }} /></div><p>{selected.confidence >= 85 ? "Strong agreement across independent public sources." : selected.confidence >= 60 ? "Useful signals found; review before outreach." : "Not enough evidence to confirm this identity."}</p></div>
-          <div className="detail-section"><div className="detail-label"><span>Contact points</span><StatusBadge status={selected.status} /></div><div className="contact-box"><Mail size={16} /><div><span>Best email</span><strong>{selected.email ?? "Still researching"}</strong></div>{selected.email ? <BadgeCheck size={16} className="verified-icon" /> : <Clock3 size={16} />}</div><div className="contact-box"><Phone size={16} /><div><span>Phone</span><strong>{selected.phone ?? "Not found"}</strong></div></div></div>
-          <div className="detail-section evidence-section"><div className="detail-label"><span>Evidence trail</span><small>{selected.sources.length} sources</small></div>{selected.sources.length ? selected.sources.map((source, index) => <a className="evidence" href={source.url} target="_blank" rel="noreferrer" key={`${source.label}-${index}`}><span className="evidence-icon"><Link2 size={15} /></span><div><strong>{source.label}</strong><p>{source.detail}</p><small>{source.capturedAt}</small></div><ArrowRight size={14} /></a>) : <div className="evidence-empty"><LoaderCircle size={18} /><span>Research begins when this record reaches a worker.</span></div>}</div>
-          <div className="detail-note"><CircleAlert size={16} /><p>Confirm high-impact outreach decisions against the linked source. Public contact data may become stale.</p></div>
-          <button className="button primary detail-action" type="button"><Check size={17} />Approve record</button>
-        </aside>
-      ) : null}
+      {selected ? <aside className="detail-panel" aria-label="Record detail"><div className="detail-top"><span>Record intelligence</span><button type="button" onClick={() => setSelected(null)} aria-label="Close detail"><X size={18} /></button></div><div className="detail-identity"><span className="detail-avatar">{initials(selected.owner)}</span><div><h2>{selected.owner}</h2><p>{selected.address}<br />{[selected.city, selected.province, selected.postalCode].filter(Boolean).join(", ")}</p></div></div><div className="detail-score"><div><span>Identity confidence</span><strong>{selected.confidence || "—"}<small>{selected.confidence ? "%" : ""}</small></strong></div><div className="score-track"><span style={{ width: `${selected.confidence}%` }} /></div><p>{selected.confidence >= 85 ? "Strong agreement across independent public sources." : selected.confidence >= 60 ? "Useful signals found; review before outreach." : "Not enough evidence to confirm this identity."}</p></div><div className="detail-section"><div className="detail-label"><span>Contact points</span><StatusBadge status={selected.status} /></div><div className="contact-box"><Mail size={16} /><div><span>Best email</span><strong>{selected.email ?? "Still researching"}</strong></div>{selected.email ? <BadgeCheck size={16} className="verified-icon" /> : <Clock3 size={16} />}</div><div className="contact-box"><Phone size={16} /><div><span>Phone</span><strong>{selected.phone ?? "Not found"}</strong></div></div></div><div className="detail-section evidence-section"><div className="detail-label"><span>Evidence trail</span><small>{selected.sources.length} sources</small></div>{selected.sources.length ? selected.sources.map((source, index) => <a className="evidence" href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}><span className="evidence-icon"><Link2 size={15} /></span><div><strong>{source.label}</strong><p>{source.detail}</p><small>{source.capturedAt}</small></div><ArrowRight size={14} /></a>) : <div className="evidence-empty"><LoaderCircle size={18} /><span>Research begins when this record reaches a worker.</span></div>}</div><div className="detail-note"><CircleAlert size={16} /><p>Confirm high-impact outreach decisions against the linked source. Public contact data may become stale.</p></div><button className="button primary detail-action" type="button" onClick={() => void approveSelectedRecord()} disabled={approvedLeadIds.has(selected.id)}><Check size={17} />{approvedLeadIds.has(selected.id) ? "Approved" : "Approve record"}</button></aside> : null}
 
-      {uploadOpen ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setUploadOpen(false); }}>
-          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
-            <div className="modal-head"><div><span className="modal-icon"><UploadCloud size={20} /></span><div><p>New enrichment</p><h2 id="upload-title">Bring your owner data</h2></div></div><button type="button" onClick={() => setUploadOpen(false)}><X size={19} /></button></div>
-            {!parsed ? <>
-              <button className="dropzone" type="button" onClick={() => fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFile(event.dataTransfer.files[0]); }}>
-                <span className="drop-icon"><FileSpreadsheet size={25} /></span><strong>{importState === "parsing" ? "Reading your dataset…" : "Drop a spreadsheet here"}</strong><span>or choose a file from your computer</span><small>CSV, TSV or XLSX · up to 25,000 rows</small>
-                <input ref={fileInput} type="file" accept=".csv,.tsv,.xlsx" hidden onChange={(event) => void handleFile(event.target.files?.[0])} />
-              </button>
-              <div className="import-features"><span><ShieldCheck size={15} />Private by default</span><span><Sparkles size={15} />Smart column mapping</span><span><FileCheck2 size={15} />Duplicate-aware</span></div>
-            </> : <>
-              <div className="file-summary"><span className="file-icon"><FileSpreadsheet size={21} /></span><div><strong>{parsed.fileName}</strong><span>{parsed.rows.length.toLocaleString()} records · {parsed.headers.length} columns</span></div><button type="button" onClick={() => setParsed(null)}>Replace</button></div>
-              <div className="mapping-head"><div><h3>Column mapping</h3><span>We matched the fields needed for research.</span></div><span className="mapping-score"><BadgeCheck size={14} />{Object.values(parsed.mapping).filter(Boolean).length} matched</span></div>
-              <div className="mapping-grid">{Object.entries(parsed.mapping).map(([field, header]) => <label key={field}><span>{field.replace(/([A-Z])/g, " $1")}</span><select value={header ?? ""} onChange={(event) => setParsed((current) => current ? { ...current, mapping: { ...current.mapping, [field]: event.target.value || null } } : current)}><option value="">Not mapped</option>{parsed.headers.map((item) => <option key={item}>{item}</option>)}</select></label>)}</div>
-              <div className="preview-table"><div className="preview-row preview-header"><span>Owner</span><span>Property address</span><span>City</span></div>{datasetToLeads({ ...parsed, rows: parsed.rows.slice(0, 3) }).map((lead) => <div className="preview-row" key={lead.id}><span>{lead.owner}</span><span>{lead.address}</span><span>{lead.city || "—"}</span></div>)}</div>
-            </>}
-            {parseError ? <div className="form-error"><CircleAlert size={15} />{parseError}</div> : null}
-            <div className="modal-foot"><p><ShieldCheck size={14} />Only public sources will be queried.</p><div><button className="button secondary" type="button" onClick={() => setUploadOpen(false)}>Cancel</button><button className="button primary" type="button" disabled={!parsed || importState === "saving"} onClick={() => void startImport()}>{importState === "saving" ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}Start enrichment</button></div></div>
-          </section>
-        </div>
-      ) : null}
+      {uploadOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setUploadOpen(false); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title"><div className="modal-head"><div><span className="modal-icon"><UploadCloud size={20} /></span><div><p>New enrichment</p><h2 id="upload-title">Bring your owner data</h2></div></div><button type="button" onClick={() => setUploadOpen(false)} aria-label="Close import"><X size={19} /></button></div>{!parsed ? <><button className="dropzone" type="button" onClick={() => fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFile(event.dataTransfer.files[0]); }}><span className="drop-icon"><FileSpreadsheet size={25} /></span><strong>{importState === "parsing" ? "Reading your dataset…" : "Drop a spreadsheet here"}</strong><span>or choose a file from your computer</span><small>CSV, TSV or XLSX · up to 25,000 rows</small><input ref={fileInput} type="file" accept=".csv,.tsv,.xlsx" hidden onChange={(event) => void handleFile(event.target.files?.[0])} /></button><div className="import-features"><span><ShieldCheck size={15} />Private by default</span><span><Sparkles size={15} />Smart column mapping</span><span><FileCheck2 size={15} />Duplicate-aware</span></div></> : <><div className="file-summary"><span className="file-icon"><FileSpreadsheet size={21} /></span><div><strong>{parsed.fileName}</strong><span>{parsed.rows.length.toLocaleString()} records · {parsed.headers.length} columns</span></div><button type="button" onClick={() => setParsed(null)}>Replace</button></div><div className="mapping-head"><div><h3>Column mapping</h3><span>We matched the fields needed for research.</span></div><span className="mapping-score"><BadgeCheck size={14} />{Object.values(parsed.mapping).filter(Boolean).length} matched</span></div><div className="mapping-grid">{Object.entries(parsed.mapping).map(([field, header]) => <label key={field}><span>{field.replace(/([A-Z])/g, " $1")}</span><select value={header ?? ""} onChange={(event) => setParsed((current) => current ? { ...current, mapping: { ...current.mapping, [field]: event.target.value || null } } : current)}><option value="">Not mapped</option>{parsed.headers.map((item) => <option key={item}>{item}</option>)}</select></label>)}</div><div className="preview-table"><div className="preview-row preview-header"><span>Owner</span><span>Property address</span><span>City</span></div>{datasetToLeads({ ...parsed, rows: parsed.rows.slice(0, 3) }).map((lead) => <div className="preview-row" key={lead.id}><span>{lead.owner}</span><span>{lead.address}</span><span>{lead.city || "—"}</span></div>)}</div></>}{parseError ? <div className="form-error"><CircleAlert size={15} />{parseError}</div> : null}<div className="modal-foot"><p><ShieldCheck size={14} />{user ? "This import will be saved only to your account." : "Sign in is required before anything is saved."}</p><div><button className="button secondary" type="button" onClick={() => setUploadOpen(false)}>Cancel</button><button className="button primary" type="button" disabled={!parsed || importState === "saving"} onClick={() => void startImport()}>{importState === "saving" ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}Start enrichment</button></div></div></section></div> : null}
 
-      {authOpen ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setAuthOpen(false); }}>
-          <section className="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-            <button className="modal-close" type="button" onClick={() => setAuthOpen(false)}><X size={19} /></button>
-            <span className="auth-icon"><UserRound size={22} /></span><p className="modal-kicker">Acreline workspace</p><h2 id="auth-title">Keep every dataset private.</h2><p className="auth-copy">Sign in with a secure email link. Your records are isolated by workspace-level database policies.</p>
-            {userEmail ? <div className="signed-in"><BadgeCheck size={18} /><div><span>Signed in as</span><strong>{userEmail}</strong></div></div> : <form onSubmit={sendMagicLink}><label>Email address<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" /></label><button className="button primary auth-submit" type="submit" disabled={authState === "sending"}>{authState === "sending" ? <LoaderCircle className="spin" size={17} /> : <Mail size={17} />}{authState === "sent" ? "Check your inbox" : "Send secure sign-in link"}</button>{authState === "sent" ? <p className="auth-success"><Check size={14} />Magic link sent. You can close this window.</p> : null}{authState === "error" ? <p className="form-error"><CircleAlert size={14} />Sign-in is unavailable until the app environment is configured.</p> : null}</form>}
-          </section>
-        </div>
-      ) : null}
+      {authOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setAuthOpen(false); }}><section className="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><button className="modal-close" type="button" onClick={() => setAuthOpen(false)} aria-label="Close account"><X size={19} /></button><span className="auth-icon"><UserRound size={22} /></span><p className="modal-kicker">Acreline workspace</p><h2 id="auth-title">{user ? "Your private workspace." : "Come back to everything."}</h2><p className="auth-copy">{user ? "Your datasets, records, sources, reviews, and job history are isolated to this account." : "Sign in with Google or a secure email link. Every account gets a completely separate data boundary."}</p>{user ? <><div className="signed-in"><BadgeCheck size={18} /><div><span>Signed in as</span><strong>{user.email}</strong></div></div><button className="button secondary auth-submit" type="button" onClick={() => void signOut()}><LogOut size={17} />Sign out</button></> : <><button className="google-button" type="button" onClick={() => void signInWithGoogle()} disabled={authState === "oauth"}><span className="google-mark">G</span>{authState === "oauth" ? "Opening Google…" : "Continue with Google"}</button><div className="auth-divider"><span>or use email</span></div><form onSubmit={sendMagicLink}><label>Email address<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" /></label><button className="button primary auth-submit" type="submit" disabled={authState === "sending"}>{authState === "sending" ? <LoaderCircle className="spin" size={17} /> : <Mail size={17} />}{authState === "sent" ? "Check your inbox" : "Send secure sign-in link"}</button>{authState === "sent" ? <p className="auth-success"><Check size={14} />Magic link sent. You can close this window.</p> : null}{authState === "error" ? <p className="form-error"><CircleAlert size={14} />Sign-in could not start. Check the allowed redirect URLs and try again.</p> : null}</form></>}</section></div> : null}
 
-      {toast ? <div className="toast"><BadgeCheck size={17} /><span>{toast}</span><button type="button" onClick={() => setToast(null)}><X size={15} /></button></div> : null}
+      {toast ? <div className="toast"><BadgeCheck size={17} /><span>{toast}</span><button type="button" onClick={() => setToast(null)} aria-label="Dismiss message"><X size={15} /></button></div> : null}
     </div>
   );
 }

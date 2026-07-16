@@ -31,18 +31,23 @@ export async function parseDataset(file: File): Promise<ParsedDataset> {
   let headers: string[] = [];
 
   if (extension === "csv" || extension === "tsv") {
-    const parsed = Papa.parse<Record<string, string>>(file, {
-      header: true,
-      skipEmptyLines: "greedy",
-      delimiter: extension === "tsv" ? "\t" : "",
-      transformHeader: (header) => clean(header),
-      transform: (value) => clean(value),
+    const parsed = await new Promise<Papa.ParseResult<Record<string, string>>>((resolve, reject) => {
+      Papa.parse<Record<string, string>>(file, {
+        header: true,
+        skipEmptyLines: "greedy",
+        delimiter: extension === "tsv" ? "\t" : "",
+        transformHeader: (header) => clean(header),
+        transform: (value) => clean(value),
+        complete: resolve,
+        error: (error) => reject(error),
+      });
     });
     if (parsed.errors.length) throw new Error(parsed.errors[0]?.message ?? "Could not read this file.");
     rows = parsed.data;
     headers = parsed.meta.fields ?? [];
   } else if (extension === "xlsx") {
-    const sheet = await readXlsxFile(file);
+    const [workbookSheet] = await readXlsxFile(file);
+    const sheet = workbookSheet?.data ?? [];
     headers = (sheet[0] ?? []).map(clean);
     rows = sheet.slice(1).filter((row) => row.some((cell) => clean(cell))).map((row) =>
       Object.fromEntries(headers.map((header, index) => [header, clean(row[index])])),

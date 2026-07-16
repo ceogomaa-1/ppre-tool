@@ -9,6 +9,7 @@ export type Evidence = {
 
 export type PropertyLead = {
   id: string;
+  datasetId?: string;
   owner: string;
   address: string;
   city: string;
@@ -29,4 +30,25 @@ export type ParsedDataset = {
   headers: string[];
   rows: Record<string, string>[];
   mapping: Record<string, string | null>;
+};
+
+export type DatasetSummary = {
+  id: string;
+  name: string;
+  rowCount: number;
+  processedCount: number;
+  matchedCount: number;
+  status: string;
+  createdAt: string;
+};
+
+export type EnrichmentJob = {
+  id: string;
+  datasetId: string;
+  status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  rowsTotal: number;
+  rowsCompleted: number;
+  rowsFailed: number;
+  estimatedCostUsd: number;
+  createdAt: string;
 };
