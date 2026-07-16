@@ -36,11 +36,13 @@ test("account, persistence, review, job, pagination, selection and export flows 
     "signOut",
     "refreshWorkspace",
     "updateLeadReview",
+    "deleteLead",
     "updateEnrichmentJob",
     "deleteDataset",
     "selectedLeadIds",
     "setPage",
     "exportCsv",
+    "Export all",
   ]) {
     assert.match(workspace, new RegExp(capability));
   }

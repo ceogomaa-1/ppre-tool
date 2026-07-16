@@ -44,7 +44,12 @@ app = FastAPI(
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "engine": "scrapling-static"}
+    try:
+        await app.state.database.select("enrichment_jobs", {"select": "id", "limit": "1"})
+    except Exception as error:
+        logger.exception("Worker readiness check failed")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable") from error
+    return {"status": "ok", "engine": "scrapling-static", "database": "connected"}
 
 
 async def run_and_release(job: dict[str, object]) -> None:

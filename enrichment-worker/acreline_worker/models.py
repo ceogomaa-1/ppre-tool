@@ -18,16 +18,16 @@ class Lead(BaseModel):
 
 class SourceCandidate(StrictModel):
     url: str
-    title: str = ""
-    match_reason: str = ""
-    claimed_emails: list[str] = Field(default_factory=list, max_length=8)
-    claimed_phones: list[str] = Field(default_factory=list, max_length=8)
-    confidence: int = Field(default=0, ge=0, le=100)
+    title: str
+    match_reason: str
+    claimed_emails: list[str] = Field(max_length=8)
+    claimed_phones: list[str] = Field(max_length=8)
+    confidence: int = Field(ge=0, le=100)
 
 
 class DiscoveryResult(StrictModel):
-    candidates: list[SourceCandidate] = Field(default_factory=list, max_length=8)
-    summary: str = Field(default="", max_length=500)
+    candidates: list[SourceCandidate] = Field(max_length=8)
+    summary: str = Field(max_length=500)
 
 
 class ScrapedEvidence(BaseModel):

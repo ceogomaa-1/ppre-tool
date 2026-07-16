@@ -133,6 +133,15 @@ export async function updateLeadReview(leadId: string, reviewState: "approved" |
   if (error) throw error;
 }
 
+export async function deleteLead(leadId: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return;
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) throw new Error("Sign in to delete records.");
+  const { error } = await supabase.rpc("delete_lead", { p_lead_id: leadId });
+  if (error) throw error;
+}
+
 export async function updateEnrichmentJob(jobId: string, status: "running" | "paused" | "cancelled") {
   const supabase = getSupabaseClient();
   if (!supabase) return;

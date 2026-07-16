@@ -56,14 +56,22 @@ class EnrichmentPipeline:
         if not jobs:
             raise ValueError("Job not found")
         job = jobs[0]
-        if job["status"] not in {"queued", "paused", "failed"}:
+        can_retry_completed = job["status"] == "completed" and int(job.get("rows_failed", 0)) > 0
+        if job["status"] not in {"queued", "paused", "failed"} and not can_retry_completed:
             raise ValueError(f"Job cannot start from status {job['status']}")
 
         now = datetime.now(UTC).isoformat()
+        if int(job.get("rows_failed", 0)) > 0:
+            await self.db.update(
+                "leads",
+                {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.failed"},
+                {"status": "queued", "last_error": None, "updated_at": now},
+            )
+            job["rows_failed"] = 0
         claimed = await self.db.update_returning(
             "enrichment_jobs",
-            {"id": f"eq.{job_id}", "status": "in.(queued,paused,failed)"},
-            {"status": "running", "started_at": now, "updated_at": now},
+            {"id": f"eq.{job_id}", "status": "in.(queued,paused,failed,completed)"},
+            {"status": "running", "rows_failed": 0, "started_at": now, "completed_at": None, "updated_at": now},
         )
         if not claimed:
             raise ValueError("Job was claimed by another worker")
@@ -82,6 +90,8 @@ class EnrichmentPipeline:
         input_tokens = int(job.get("input_tokens", 0))
         output_tokens = int(job.get("output_tokens", 0))
         processed_this_run = 0
+        repeated_error = ""
+        repeated_error_count = 0
 
         try:
             now = datetime.now(UTC).isoformat()
@@ -124,27 +134,41 @@ class EnrichmentPipeline:
                         input_tokens += used_input
                         output_tokens += used_output
                         completed += 1
+                        repeated_error = ""
+                        repeated_error_count = 0
                     except Exception as error:
                         failed += 1
-                        await self.db.update("leads", {"id": f"eq.{lead.id}"}, {"status": "failed", "last_error": str(error)[:500], "updated_at": datetime.now(UTC).isoformat()})
+                        error_text = str(error)[:500]
+                        await self.db.update("leads", {"id": f"eq.{lead.id}"}, {"status": "failed", "last_error": error_text, "updated_at": datetime.now(UTC).isoformat()})
+                        repeated_error_count = repeated_error_count + 1 if error_text == repeated_error else 1
+                        repeated_error = error_text
                     processed_this_run += 1
-                    if (completed + failed) % 10 == 0:
-                        await self._update_job(job_id, completed, failed, input_tokens, output_tokens)
+                    await self._update_job(job_id, completed, failed, input_tokens, output_tokens)
+                    if repeated_error_count >= 3:
+                        raise RuntimeError(f"Systemic enrichment failure after 3 records: {repeated_error}")
 
             remaining = await self.db.select(
                 "leads",
                 {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.queued", "select": "id", "limit": "1"},
             )
-            final_status = "paused" if remaining else "completed"
+            final_status = "paused" if remaining else "failed" if failed else "completed"
             await self._update_job(job_id, completed, failed, input_tokens, output_tokens, final_status=final_status)
+            matched = await self.db.select(
+                "leads",
+                {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.verified", "select": "id", "limit": "25000"},
+            )
             await self.db.update(
                 "datasets",
                 {"id": f"eq.{job['dataset_id']}"},
-                {"status": final_status, "processed_count": completed + failed, "failed_count": failed, "updated_at": datetime.now(UTC).isoformat()},
+                {"status": final_status, "processed_count": completed + failed, "matched_count": len(matched), "failed_count": failed, "updated_at": datetime.now(UTC).isoformat()},
             )
         except Exception:
             await self.db.update("enrichment_jobs", {"id": f"eq.{job_id}"}, {"status": "failed", "updated_at": datetime.now(UTC).isoformat()})
-            await self.db.update("datasets", {"id": f"eq.{job['dataset_id']}"}, {"status": "failed", "updated_at": datetime.now(UTC).isoformat()})
+            await self.db.update(
+                "datasets",
+                {"id": f"eq.{job['dataset_id']}"},
+                {"status": "failed", "processed_count": completed + failed, "failed_count": failed, "updated_at": datetime.now(UTC).isoformat()},
+            )
             raise
 
     async def _process_lead(self, lead: Lead) -> tuple[int, int]:
@@ -210,6 +234,6 @@ class EnrichmentPipeline:
         }
         if final_status:
             payload["status"] = final_status
-            if final_status == "completed":
+            if final_status in {"completed", "failed"}:
                 payload["completed_at"] = datetime.now(UTC).isoformat()
         await self.db.update("enrichment_jobs", {"id": f"eq.{job_id}"}, payload)
