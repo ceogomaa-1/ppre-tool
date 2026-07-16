@@ -15,15 +15,17 @@ async function render() {
   );
 }
 
-test("server-renders the Acreline product shell and social metadata", async () => {
+test("server-renders the Acreline welcome screen and social metadata without fake records", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<title>Acreline — Property intelligence, with receipts<\/title>/i);
   assert.match(html, /Turn bulk owner records into verified, source-backed property intelligence/);
-  assert.match(html, /Property intelligence/);
-  assert.match(html, /Owner records/);
+  assert.match(html, /Turn raw records into/);
+  assert.match(html, /Continue with Google|Restoring your workspace/);
+  assert.match(html, /Research pipeline/);
+  assert.doesNotMatch(html, /Toronto owner portfolio|Avery Morgan|Owner records/);
   assert.match(html, /https:\/\/acreline\.example\/og\.png/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });

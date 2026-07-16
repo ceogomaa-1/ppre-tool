@@ -42,7 +42,6 @@ import {
 import type { User } from "@supabase/supabase-js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { datasetToLeads, parseDataset } from "@/lib/import-dataset";
-import { sampleLeads } from "@/lib/sample-data";
 import {
   deleteDataset,
   getSupabaseClient,
@@ -117,11 +116,72 @@ function MetricCard({ label, value, detail, icon: Icon, tone }: { label: string;
   );
 }
 
+function GoogleMark() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 18 18" width="18" height="18">
+      <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.91c1.7-1.57 2.69-3.88 2.69-6.62Z" />
+      <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.91-2.26c-.81.54-1.84.86-3.05.86-2.34 0-4.33-1.59-5.04-3.72H.96v2.33A9 9 0 0 0 9 18Z" />
+      <path fill="#FBBC05" d="M3.96 10.7A5.4 5.4 0 0 1 3.68 9c0-.59.1-1.16.28-1.7V4.97H.96A9 9 0 0 0 0 9c0 1.45.35 2.82.96 4.03l3-2.33Z" />
+      <path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.59-2.59A8.68 8.68 0 0 0 9 0 9 9 0 0 0 .96 4.97l3 2.33C4.67 5.17 6.66 3.58 9 3.58Z" />
+    </svg>
+  );
+}
+
+function WelcomeScreen({ loading, authState, onGoogle }: { loading: boolean; authState: AuthState; onGoogle: () => void }) {
+  const openingGoogle = authState === "oauth";
+  return (
+    <main className="welcome-shell">
+      <div className="welcome-glow welcome-glow-one" />
+      <div className="welcome-glow welcome-glow-two" />
+      <header className="welcome-header">
+        <div className="welcome-brand"><span className="welcome-brand-mark"><Layers3 size={19} strokeWidth={2.4} /></span><span>Acreline</span></div>
+        <span className="welcome-security"><ShieldCheck size={15} />Private by default</span>
+      </header>
+
+      <section className="welcome-grid">
+        <div className="welcome-copy-block">
+          <div className="welcome-eyebrow"><span />Property owner intelligence</div>
+          <h1>Turn raw records into<br /><em>contacts you can trust.</em></h1>
+          <p>Upload a spreadsheet. Acreline researches each owner across public sources, verifies every useful contact, and keeps the evidence attached.</p>
+
+          <div className="welcome-action-card">
+            <span className="welcome-action-label">Open your private workspace</span>
+            <button className="welcome-google-button" type="button" onClick={onGoogle} disabled={loading || openingGoogle}>
+              {loading || openingGoogle ? <LoaderCircle className="spin" size={18} /> : <GoogleMark />}
+              <span>{loading ? "Restoring your workspace…" : openingGoogle ? "Opening Google…" : "Continue with Google"}</span>
+              {!loading && !openingGoogle ? <ArrowRight size={17} /> : null}
+            </button>
+            {authState === "error" ? <p className="welcome-auth-error" role="alert"><CircleAlert size={15} />Google sign-in could not start. Please try again.</p> : null}
+            <div className="welcome-trust-row"><span><LockKeyhole size={13} />Your data stays in your account</span><span><BadgeCheck size={13} />Source-backed results</span></div>
+          </div>
+        </div>
+
+        <div className="welcome-product-wrap" aria-label="How Acreline works">
+          <div className="welcome-product">
+            <div className="welcome-product-head"><div><span className="welcome-mini-logo"><Layers3 size={14} /></span><span>Research pipeline</span></div><span className="welcome-public-pill"><Globe2 size={12} />Public web only</span></div>
+            <div className="welcome-flow">
+              <article><span className="welcome-step-icon welcome-step-violet"><FileSpreadsheet size={19} /></span><div><small>01 · Import</small><strong>Bring the records</strong><p>CSV, TSV, or Excel—mapped and stored privately.</p></div><Check size={16} /></article>
+              <span className="welcome-flow-line" />
+              <article><span className="welcome-step-icon welcome-step-lime"><Search size={19} /></span><div><small>02 · Discover</small><strong>Research the public web</strong><p>Official sites, registries, directories, and public social profiles.</p></div><Sparkles size={16} /></article>
+              <span className="welcome-flow-line" />
+              <article><span className="welcome-step-icon welcome-step-blue"><BadgeCheck size={19} /></span><div><small>03 · Verify</small><strong>Keep the receipts</strong><p>Confidence, contact points, and evidence URLs in one view.</p></div><Check size={16} /></article>
+            </div>
+            <div className="welcome-evidence-card"><span><ShieldCheck size={17} /></span><div><small>Evidence before confidence</small><strong>Every useful result stays tied to its public source.</strong></div></div>
+          </div>
+          <div className="welcome-private-card"><LockKeyhole size={16} /><div><strong>Isolated workspace</strong><span>RLS-enforced account boundary</span></div><BadgeCheck size={16} /></div>
+        </div>
+      </section>
+
+      <footer className="welcome-footer"><span>Responsible public-web research</span><span>Acreline · Property intelligence, with receipts.</span></footer>
+    </main>
+  );
+}
+
 export function Workspace() {
   const [view, setView] = useState<View>("overview");
   const [user, setUser] = useState<User | null>(null);
   const [accountLoading, setAccountLoading] = useState(true);
-  const [leads, setLeads] = useState<PropertyLead[]>(sampleLeads);
+  const [leads, setLeads] = useState<PropertyLead[]>([]);
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
   const [jobs, setJobs] = useState<EnrichmentJob[]>([]);
   const [selected, setSelected] = useState<PropertyLead | null>(null);
@@ -140,7 +200,6 @@ export function Workspace() {
   const [parseError, setParseError] = useState<string | null>(null);
   const [importState, setImportState] = useState<"idle" | "parsing" | "saving">("idle");
   const [toast, setToast] = useState<string | null>(null);
-  const [demoRunning, setDemoRunning] = useState(true);
   const [jobBusy, setJobBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -167,7 +226,7 @@ export function Workspace() {
       setAccountLoading(true);
       if (!activeUser) {
         setUser(null);
-        setLeads(sampleLeads);
+        setLeads([]);
         setDatasets([]);
         setJobs([]);
         setSelected(null);
@@ -224,17 +283,17 @@ export function Workspace() {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, []);
 
-  const displayName = user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email?.split("@")[0] || "Avery Morgan";
+  const displayName = user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email?.split("@")[0] || "Acreline user";
   const avatarText = initials(displayName) || "AM";
   const pendingCount = leads.filter((lead) => lead.status === "queued" || lead.status === "reviewing" || lead.status === "attention").length;
   const verifiedCount = leads.filter((lead) => lead.status === "verified").length;
   const avgConfidence = leads.length ? leads.reduce((sum, lead) => sum + lead.confidence, 0) / leads.length : 0;
   const activeJob = jobs.find((job) => ["running", "paused", "queued"].includes(job.status)) ?? jobs[0] ?? null;
   const activeDataset = activeJob ? datasets.find((dataset) => dataset.id === activeJob.datasetId) : null;
-  const runTotal = activeJob?.rowsTotal ?? (user ? 0 : 12_842);
-  const runCompleted = activeJob?.rowsCompleted ?? (user ? 0 : 8_216);
+  const runTotal = activeJob?.rowsTotal ?? 0;
+  const runCompleted = activeJob?.rowsCompleted ?? 0;
   const runProgress = runTotal ? Math.min(100, Math.round((runCompleted / runTotal) * 100)) : 0;
-  const isRunning = activeJob ? activeJob.status === "running" : demoRunning;
+  const isRunning = activeJob?.status === "running";
 
   const filteredLeads = useMemo(() => {
     const needle = search.toLowerCase().trim();
@@ -351,8 +410,7 @@ export function Workspace() {
 
   async function toggleActiveJob() {
     if (!user || !activeJob) {
-      setDemoRunning((current) => !current);
-      setToast(demoRunning ? "Preview enrichment paused." : "Preview enrichment resumed.");
+      setToast("There is no active enrichment job yet.");
       return;
     }
     setJobBusy(true);
@@ -412,6 +470,10 @@ export function Workspace() {
   const copy = viewCopy[view];
   const showRecords = view === "overview" || view === "enrichment" || view === "exports";
 
+  if (accountLoading || !user) {
+    return <WelcomeScreen loading={accountLoading} authState={authState} onGoogle={() => void signInWithGoogle()} />;
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -434,7 +496,7 @@ export function Workspace() {
         </div>
         <button className="profile" type="button" onClick={() => setAuthOpen(true)}>
           <span className="profile-avatar">{avatarText}</span>
-          <span><strong>{displayName}</strong><small>{user?.email ?? "Demo workspace"}</small></span>
+          <span><strong>{displayName}</strong><small>{user.email ?? "Private workspace"}</small></span>
           <ChevronDown size={15} />
         </button>
       </aside>
@@ -464,15 +526,15 @@ export function Workspace() {
           </section>
 
           {view === "overview" ? <section className="metrics" aria-label="Workspace metrics">
-            <MetricCard label="Records processed" value={leads.length.toLocaleString()} detail={user ? `${datasets.length} private datasets` : "Interactive preview data"} icon={FileCheck2} tone="violet" />
+            <MetricCard label="Records processed" value={leads.length.toLocaleString()} detail={`${datasets.length} private datasets`} icon={FileCheck2} tone="violet" />
             <MetricCard label="Verified contacts" value={verifiedCount.toLocaleString()} detail={leads.length ? `${Math.round((verifiedCount / leads.length) * 100)}% match rate` : "No records yet"} icon={BadgeCheck} tone="green" />
             <MetricCard label="Avg. confidence" value={leads.length ? `${avgConfidence.toFixed(1)}%` : "—"} detail="Across visible account data" icon={Activity} tone="blue" />
             <MetricCard label="Est. AI cost" value={jobs.length ? `$${jobs.reduce((sum, job) => sum + job.estimatedCostUsd, 0).toFixed(2)}` : "$0.00"} detail="Cached results reduce repeat spend" icon={Sparkles} tone="amber" />
           </section> : null}
 
-          {(view === "overview" || view === "enrichment") && (activeJob || !user) ? <section className="run-card">
+          {(view === "overview" || view === "enrichment") && activeJob ? <section className="run-card">
             <div className="run-main">
-              <div className="run-title"><span className="run-icon"><Globe2 size={20} /></span><div><span className="section-kicker">Active enrichment</span><h2>{activeDataset?.name ?? (user ? "Latest account job" : "Toronto owner portfolio — preview")}</h2></div></div>
+              <div className="run-title"><span className="run-icon"><Globe2 size={20} /></span><div><span className="section-kicker">Active enrichment</span><h2>{activeDataset?.name ?? "Latest account job"}</h2></div></div>
               <div className="run-stats"><strong>{isRunning ? `${runProgress}%` : activeJob?.status === "completed" ? "Done" : "Paused"}</strong><span>{runCompleted.toLocaleString()} of {runTotal.toLocaleString()} records</span></div>
               <div className="progress"><span style={{ width: `${runProgress}%` }} /></div>
               <div className="run-foot"><span><span className={`pulse ${isRunning ? "" : "pulse-paused"}`} />{isRunning ? "Workers researching public sources" : "Workers safely paused"}</span><span>{activeJob?.rowsFailed ? `${activeJob.rowsFailed} need attention` : "Evidence retained automatically"}</span></div>
