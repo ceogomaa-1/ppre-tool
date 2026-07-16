@@ -3,7 +3,7 @@ uvicorn==0.51.0
 openai==2.45.0
 httpx==0.28.1
 pydantic-settings==2.14.2
-scrapling==0.4.8
+scrapling[fetchers]==0.4.8
 curl_cffi==0.15.0
 lxml==6.1.0
 cssselect==1.4.0

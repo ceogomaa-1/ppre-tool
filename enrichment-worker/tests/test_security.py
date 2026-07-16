@@ -15,6 +15,16 @@ class PublicUrlTests(unittest.IsolatedAsyncioTestCase):
         result = await validate_public_url("https://Example.com/contact?ref=1#team")
         self.assertEqual(result, "https://example.com/contact?ref=1")
 
+    @patch("acreline_worker.security.socket.getaddrinfo", return_value=address("93.184.216.34"))
+    async def test_accepts_public_social_sources_by_default(self, _resolver) -> None:
+        for url in (
+            "https://facebook.com/public-profile",
+            "https://instagram.com/public-profile",
+            "https://tiktok.com/@public-profile",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(await validate_public_url(url), url)
+
     @patch("acreline_worker.security.socket.getaddrinfo", return_value=address("127.0.0.1"))
     async def test_blocks_loopback_resolution(self, _resolver) -> None:
         with self.assertRaises(UnsafeTargetError):

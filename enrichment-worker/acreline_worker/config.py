@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     scrape_timeout_seconds: float = Field(default=12, ge=3, le=30)
     cache_ttl_days: int = Field(default=30, ge=1, le=180)
     allowed_domains: str = ""
-    blocked_domains: str = "facebook.com,instagram.com,tiktok.com"
+    blocked_domains: str = ""
 
     @property
     def allowed_domain_set(self) -> set[str]:
