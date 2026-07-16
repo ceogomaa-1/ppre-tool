@@ -1,0 +1,10 @@
+.next
+dist
+node_modules
+.audit
+outputs
+.wrangler
+.vinext
+.vercel
+enrichment-worker/**/__pycache__
+enrichment-worker/**/*.pyc
