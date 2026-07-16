@@ -3,8 +3,10 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import Settings
+from .costs import estimate_cost
 from .models import DiscoveryResult, Lead, ScrapedEvidence
 from .openai_enrichment import DiscoveryClient
 from .scraper import PublicWebScraper
@@ -12,7 +14,7 @@ from .supabase_rest import SupabaseRest
 
 
 def fingerprint(lead: Lead) -> str:
-    identity = "|".join(
+    identity = "contact-verification-v2|" + "|".join(
         str(value or "").strip().lower()
         for value in [lead.owner_name, lead.property_address, lead.city, lead.province, lead.postal_code]
     )
@@ -20,17 +22,68 @@ def fingerprint(lead: Lead) -> str:
 
 
 def _merge_evidence(evidence: list[ScrapedEvidence], discovery: DiscoveryResult) -> dict[str, Any]:
-    ranked = sorted(evidence, key=lambda item: item.confidence, reverse=True)
-    emails = list(dict.fromkeys(email for item in ranked for email in item.emails))
-    phones = list(dict.fromkeys(phone for item in ranked for phone in item.phones))
-    contact_sources = sum(bool(item.emails or item.phones) for item in ranked)
-    raw_score = max((item.confidence for item in ranked), default=0)
-    confidence = min(99, raw_score + (5 if contact_sources >= 2 else 0))
-    if contact_sources == 1:
-        confidence = min(confidence, 84)
-    if not emails and not phones:
-        confidence = min(confidence, 55)
-    status = "verified" if confidence >= 85 and (emails or phones) else "needs_review" if evidence else "not_found"
+    usable = [item for item in evidence if item.identity_match != "weak"]
+
+    def independent_domain(value: str) -> str:
+        host = (urlsplit(value).hostname or "").lower().removeprefix("www.")
+        labels = host.split(".")
+        if len(labels) <= 2:
+            return host
+        common_two_part_suffixes = {"co.uk", "org.uk", "com.au", "com.br", "co.nz"}
+        suffix = ".".join(labels[-2:])
+        return ".".join(labels[-3:]) if suffix in common_two_part_suffixes else suffix
+
+    email_support: dict[str, set[str]] = {}
+    phone_support: dict[str, set[str]] = {}
+    email_roles: dict[str, set[str]] = {}
+    phone_roles: dict[str, set[str]] = {}
+    for item in usable:
+        domain = independent_domain(item.url)
+        for email in item.emails:
+            normalized_email = email.lower()
+            email_support.setdefault(normalized_email, set()).add(domain)
+            email_roles.setdefault(normalized_email, set()).add(item.source_role)
+        for phone in item.phones:
+            phone_support.setdefault(phone, set()).add(domain)
+            phone_roles.setdefault(phone, set()).add(item.source_role)
+
+    authoritative_roles = {"first_party", "government"}
+    corroborated_emails = [
+        value for value, domains in email_support.items()
+        if len(domains) >= 2 and email_roles[value] & authoritative_roles
+    ]
+    corroborated_phones = [
+        value for value, domains in phone_support.items()
+        if len(domains) >= 2 and phone_roles[value] & authoritative_roles
+    ]
+    is_verified = bool(corroborated_emails or corroborated_phones)
+    if is_verified:
+        emails, phones = corroborated_emails, corroborated_phones
+        strongest_support = max(
+            [len(domains) for domains in email_support.values()] + [len(domains) for domains in phone_support.values()]
+        )
+        confidence = 90 if strongest_support >= 3 else 86
+        status = "verified"
+    else:
+        emails = list(email_support)
+        phones = list(phone_support)
+        has_strong_single_source = any(
+            item.identity_match == "exact" and item.source_role in {"first_party", "government"}
+            and bool(item.emails or item.phones)
+            for item in usable
+        )
+        if emails or phones:
+            confidence = 68 if has_strong_single_source else 58
+            status = "needs_review"
+        elif any(item.identity_match == "exact" for item in usable):
+            confidence = 45
+            status = "not_found"
+        elif usable:
+            confidence = 30
+            status = "not_found"
+        else:
+            confidence = 0
+            status = "not_found"
     return {
         "email": emails[0] if emails else None,
         "phone": phones[0] if phones else None,
@@ -56,6 +109,8 @@ class EnrichmentPipeline:
         if not jobs:
             raise ValueError("Job not found")
         job = jobs[0]
+        if not bool(job.get("cost_estimate_complete", False)):
+            raise ValueError("Legacy job is locked because paid web-search calls were not tracked")
         can_retry_completed = job["status"] == "completed" and int(job.get("rows_failed", 0)) > 0
         if job["status"] not in {"queued", "paused", "failed"} and not can_retry_completed:
             raise ValueError(f"Job cannot start from status {job['status']}")
@@ -89,6 +144,10 @@ class EnrichmentPipeline:
         failed = int(job.get("rows_failed", 0))
         input_tokens = int(job.get("input_tokens", 0))
         output_tokens = int(job.get("output_tokens", 0))
+        web_search_calls = int(job.get("web_search_calls", 0))
+        model = str(job.get("model") or self.settings.openai_model)
+        source_limit = min(int(job.get("configuration", {}).get("source_limit", 3)), self.settings.max_sources_per_lead, 3)
+        cost_limit = Decimal(str(job.get("cost_limit_usd") or "2.00"))
         processed_this_run = 0
         repeated_error = ""
         repeated_error_count = 0
@@ -129,10 +188,22 @@ class EnrichmentPipeline:
                             )
                         return
                     lead = Lead.model_validate(row)
+                    current_cost = estimate_cost(model, input_tokens, output_tokens, web_search_calls)
+                    if current_cost + Decimal("0.05") > cost_limit:
+                        await self._update_job(
+                            job_id, completed, failed, input_tokens, output_tokens, web_search_calls,
+                            model=model, final_status="paused",
+                        )
+                        await self.db.update(
+                            "datasets", {"id": f"eq.{job['dataset_id']}"},
+                            {"status": "paused", "updated_at": datetime.now(UTC).isoformat()},
+                        )
+                        return
                     try:
-                        used_input, used_output = await self._process_lead(lead)
+                        used_input, used_output, used_searches = await self._process_lead(lead, model, source_limit)
                         input_tokens += used_input
                         output_tokens += used_output
+                        web_search_calls += used_searches
                         completed += 1
                         repeated_error = ""
                         repeated_error_count = 0
@@ -143,7 +214,7 @@ class EnrichmentPipeline:
                         repeated_error_count = repeated_error_count + 1 if error_text == repeated_error else 1
                         repeated_error = error_text
                     processed_this_run += 1
-                    await self._update_job(job_id, completed, failed, input_tokens, output_tokens)
+                    await self._update_job(job_id, completed, failed, input_tokens, output_tokens, web_search_calls, model=model)
                     if repeated_error_count >= 3:
                         raise RuntimeError(f"Systemic enrichment failure after 3 records: {repeated_error}")
 
@@ -152,7 +223,7 @@ class EnrichmentPipeline:
                 {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.queued", "select": "id", "limit": "1"},
             )
             final_status = "paused" if remaining else "failed" if failed else "completed"
-            await self._update_job(job_id, completed, failed, input_tokens, output_tokens, final_status=final_status)
+            await self._update_job(job_id, completed, failed, input_tokens, output_tokens, web_search_calls, model=model, final_status=final_status)
             matched = await self.db.select(
                 "leads",
                 {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.verified", "select": "id", "limit": "25000"},
@@ -171,7 +242,7 @@ class EnrichmentPipeline:
             )
             raise
 
-    async def _process_lead(self, lead: Lead) -> tuple[int, int]:
+    async def _process_lead(self, lead: Lead, model: str, source_limit: int) -> tuple[int, int, int]:
         key = fingerprint(lead)
         cached = await self.db.select(
             "enrichment_cache",
@@ -179,12 +250,12 @@ class EnrichmentPipeline:
         )
         if cached:
             await self.db.update("leads", {"id": f"eq.{lead.id}"}, cached[0]["result"])
-            return 0, 0
+            return 0, 0, 0
 
         await self.db.update("leads", {"id": f"eq.{lead.id}"}, {"status": "researching", "updated_at": datetime.now(UTC).isoformat()})
-        discovery, input_tokens, output_tokens = await self.discovery.discover(lead)
-        candidates = discovery.candidates[: self.settings.max_sources_per_lead]
-        results = await asyncio.gather(*(self.scraper.fetch(candidate, lead.owner_name) for candidate in candidates))
+        discovery, input_tokens, output_tokens, web_search_calls = await self.discovery.discover(lead, model, source_limit)
+        candidates = discovery.candidates[:source_limit]
+        results = await asyncio.gather(*(self.scraper.fetch(candidate, lead) for candidate in candidates))
         evidence = [item for item in results if item is not None]
         result = _merge_evidence(evidence, discovery)
         await self.db.update("leads", {"id": f"eq.{lead.id}"}, result)
@@ -200,7 +271,13 @@ class EnrichmentPipeline:
                         "source_domain": item.domain,
                         "title": item.title,
                         "snippet": item.snippet,
-                        "evidence": {"reason": item.match_reason, "emails": item.emails, "phones": item.phones, "confidence": item.confidence},
+                        "evidence": {
+                            "reason": item.match_reason,
+                            "emails": item.emails,
+                            "phones": item.phones,
+                            "source_role": item.source_role,
+                            "identity_match": item.identity_match,
+                        },
                         "content_hash": hashlib.sha256(item.snippet.encode("utf-8")).hexdigest(),
                     }
                     for item in evidence
@@ -219,17 +296,21 @@ class EnrichmentPipeline:
             },
             "user_id,fingerprint",
         )
-        return input_tokens, output_tokens
+        return input_tokens, output_tokens, web_search_calls
 
-    async def _update_job(self, job_id: str, completed: int, failed: int, input_tokens: int, output_tokens: int, *, final_status: str | None = None) -> None:
-        # Token-only estimate; built-in web-search fees are reported separately by OpenAI billing.
-        token_cost = (Decimal(input_tokens) * Decimal("1") + Decimal(output_tokens) * Decimal("6")) / Decimal(1_000_000)
+    async def _update_job(
+        self, job_id: str, completed: int, failed: int, input_tokens: int, output_tokens: int,
+        web_search_calls: int, *, model: str, final_status: str | None = None,
+    ) -> None:
+        tracked_cost = estimate_cost(model, input_tokens, output_tokens, web_search_calls)
         payload: dict[str, Any] = {
             "rows_completed": completed,
             "rows_failed": failed,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "estimated_cost_usd": str(token_cost.quantize(Decimal("0.000001"))),
+            "web_search_calls": web_search_calls,
+            "cost_estimate_complete": True,
+            "estimated_cost_usd": str(tracked_cost.quantize(Decimal("0.000001"))),
             "updated_at": datetime.now(UTC).isoformat(),
         }
         if final_status:

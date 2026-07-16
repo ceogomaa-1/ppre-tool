@@ -1,11 +1,17 @@
 import asyncio
 from urllib.parse import urlsplit
 
-from scrapling.fetchers import AsyncFetcher
+try:
+    from scrapling.fetchers import AsyncFetcher
+except ModuleNotFoundError:  # Keeps pure unit tests runnable before optional browser dependencies are installed.
+    class AsyncFetcher:  # type: ignore[no-redef]
+        @staticmethod
+        async def get(*_: object, **__: object) -> object:
+            raise RuntimeError("Scrapling fetcher dependencies are not installed")
 
 from .config import Settings
-from .extract import evidence_snippet, extract_contacts
-from .models import ScrapedEvidence, SourceCandidate
+from .extract import contact_is_near_identity, evidence_snippet, extract_contacts, normalize_phone
+from .models import Lead, ScrapedEvidence, SourceCandidate
 from .security import UnsafeTargetError, validate_public_url
 
 
@@ -14,7 +20,7 @@ class PublicWebScraper:
         self._settings = settings
         self._semaphore = asyncio.Semaphore(settings.worker_concurrency)
 
-    async def fetch(self, candidate: SourceCandidate, owner_name: str) -> ScrapedEvidence | None:
+    async def fetch(self, candidate: SourceCandidate, lead: Lead) -> ScrapedEvidence | None:
         try:
             url = await validate_public_url(
                 candidate.url,
@@ -39,19 +45,30 @@ class PublicWebScraper:
         except Exception:
             return None
 
-        emails, phones = extract_contacts(text)
+        is_binary_pdf = text.lstrip().startswith("%PDF-")
+        emails, phones = ([], []) if is_binary_pdf else extract_contacts(text)
         claimed_emails = {value.lower() for value in candidate.claimed_emails}
-        claimed_phones = {"".join(filter(str.isdigit, value))[-10:] for value in candidate.claimed_phones}
-        verified_emails = [value for value in emails if not claimed_emails or value in claimed_emails]
-        verified_phones = [value for value in phones if not claimed_phones or "".join(filter(str.isdigit, value))[-10:] in claimed_phones]
-        needles = [owner_name, *verified_emails[:2], *verified_phones[:1]]
+        claimed_phones = {normalized for value in candidate.claimed_phones if (normalized := normalize_phone(value))}
+        verified_emails = [
+            value for value in emails
+            if candidate.identity_match != "weak" and value in claimed_emails
+            and contact_is_near_identity(text, value, lead.owner_name, lead.property_address)
+        ]
+        verified_phones = [
+            normalized for value in phones
+            if candidate.identity_match != "weak"
+            and (normalized := normalize_phone(value)) in claimed_phones
+            and contact_is_near_identity(text, value, lead.owner_name, lead.property_address)
+        ]
+        needles = [lead.owner_name, *verified_emails[:2], *verified_phones[:1]]
         return ScrapedEvidence(
             url=url,
             domain=urlsplit(url).hostname or "",
             title=candidate.title,
+            source_role=candidate.source_role,
+            identity_match=candidate.identity_match,
             match_reason=candidate.match_reason,
             emails=verified_emails,
             phones=verified_phones,
-            snippet=evidence_snippet(text, needles),
-            confidence=candidate.confidence,
+            snippet="PDF retained as identity evidence; contact extraction skipped." if is_binary_pdf else evidence_snippet(text, needles),
         )

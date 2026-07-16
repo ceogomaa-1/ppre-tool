@@ -19,10 +19,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const { data: auth, error: authError } = await supabase.auth.getUser(token);
   if (authError || !auth.user) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { data: job, error: jobError } = await supabase.from("enrichment_jobs").select("id,user_id,status,rows_failed").eq("id", id).single();
+  const { data: job, error: jobError } = await supabase.from("enrichment_jobs").select("id,user_id,status,rows_failed,rows_completed,cost_estimate_complete").eq("id", id).single();
   if (jobError || !job || job.user_id !== auth.user.id) return Response.json({ error: "Job not found" }, { status: 404 });
   const canRetryCompleted = job.status === "completed" && job.rows_failed > 0;
   if (!['queued', 'paused', 'failed'].includes(job.status) && !canRetryCompleted) return Response.json({ error: "Job cannot be started" }, { status: 409 });
+  if (!job.cost_estimate_complete) {
+    return Response.json({ error: "This legacy run is locked because paid search fees were not tracked. Start a new cost-capped enrichment." }, { status: 409 });
+  }
 
   const workerUrl = process.env.WORKER_URL;
   const workerSecret = process.env.WORKER_SHARED_SECRET;

@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     supabase_service_role_key: SecretStr
     openai_api_key: SecretStr
     worker_shared_secret: SecretStr = Field(min_length=24)
-    openai_model: str = "gpt-5.6-luna"
+    openai_model: str = "gpt-4o-mini"
     worker_concurrency: int = Field(default=4, ge=1, le=12)
-    max_sources_per_lead: int = Field(default=5, ge=1, le=8)
+    max_sources_per_lead: int = Field(default=3, ge=1, le=5)
     scrape_timeout_seconds: float = Field(default=12, ge=3, le=30)
     cache_ttl_days: int = Field(default=30, ge=1, le=180)
     allowed_domains: str = ""

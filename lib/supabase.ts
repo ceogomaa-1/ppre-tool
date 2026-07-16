@@ -104,7 +104,7 @@ export async function loadEnrichmentJobs(): Promise<EnrichmentJob[]> {
   if (!auth.user) return [];
   const { data, error } = await supabase
     .from("enrichment_jobs")
-    .select("id,dataset_id,status,rows_total,rows_completed,rows_failed,estimated_cost_usd,created_at")
+    .select("id,dataset_id,status,rows_total,rows_completed,rows_failed,estimated_cost_usd,web_search_calls,cost_estimate_complete,cost_limit_usd,created_at")
     .eq("user_id", auth.user.id)
     .order("created_at", { ascending: false });
   if (error) throw error;
@@ -116,6 +116,9 @@ export async function loadEnrichmentJobs(): Promise<EnrichmentJob[]> {
     rowsCompleted: row.rows_completed,
     rowsFailed: row.rows_failed,
     estimatedCostUsd: Number(row.estimated_cost_usd ?? 0),
+    webSearchCalls: Number(row.web_search_calls ?? 0),
+    costEstimateComplete: Boolean(row.cost_estimate_complete),
+    costLimitUsd: row.cost_limit_usd == null ? null : Number(row.cost_limit_usd),
     createdAt: new Date(row.created_at).toLocaleString(),
   }));
 }
@@ -172,7 +175,7 @@ export async function deleteDataset(datasetId: string) {
   if (error) throw error;
 }
 
-export async function persistDataset(dataset: ParsedDataset, leads: PropertyLead[]) {
+export async function persistDataset(dataset: ParsedDataset, leads: PropertyLead[], requestedCostLimitUsd: number) {
   const supabase = getSupabaseClient();
   if (!supabase) return { mode: "demo" as const };
   const { data: auth } = await supabase.auth.getUser();
@@ -225,9 +228,12 @@ export async function persistDataset(dataset: ParsedDataset, leads: PropertyLead
     dataset_id: created.id,
     user_id: auth.user.id,
     status: "queued",
-    model: "gpt-5.6-luna",
+    model: "gpt-4o-mini",
     rows_total: leads.length,
-    configuration: { max_records: leads.length, source_limit: 5, public_web_only: true },
+    web_search_calls: 0,
+    cost_estimate_complete: true,
+    cost_limit_usd: Math.min(25, Math.max(0.25, requestedCostLimitUsd)),
+    configuration: { max_records: leads.length, source_limit: 3, public_web_only: true, verification_version: 2 },
   }).select("id").single();
   if (jobError) throw jobError;
   const { data: session } = await supabase.auth.getSession();

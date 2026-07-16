@@ -50,5 +50,8 @@ export type EnrichmentJob = {
   rowsCompleted: number;
   rowsFailed: number;
   estimatedCostUsd: number;
+  webSearchCalls: number;
+  costEstimateComplete: boolean;
+  costLimitUsd: number | null;
   createdAt: string;
 };

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -19,10 +21,11 @@ class Lead(BaseModel):
 class SourceCandidate(StrictModel):
     url: str
     title: str
+    source_role: Literal["first_party", "government", "directory", "social", "news", "other"]
+    identity_match: Literal["exact", "probable", "weak"]
     match_reason: str
     claimed_emails: list[str] = Field(max_length=8)
     claimed_phones: list[str] = Field(max_length=8)
-    confidence: int = Field(ge=0, le=100)
 
 
 class DiscoveryResult(StrictModel):
@@ -34,8 +37,9 @@ class ScrapedEvidence(BaseModel):
     url: str
     domain: str
     title: str
+    source_role: Literal["first_party", "government", "directory", "social", "news", "other"] = "other"
+    identity_match: Literal["exact", "probable", "weak"] = "weak"
     match_reason: str
     emails: list[str] = Field(default_factory=list)
     phones: list[str] = Field(default_factory=list)
     snippet: str = ""
-    confidence: int = Field(default=0, ge=0, le=100)
