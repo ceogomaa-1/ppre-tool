@@ -1,6 +1,7 @@
 import asyncio
 import hmac
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -49,7 +50,12 @@ async def health() -> dict[str, str]:
     except Exception as error:
         logger.exception("Worker readiness check failed")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable") from error
-    return {"status": "ok", "engine": "scrapling-static", "database": "connected"}
+    return {
+        "status": "ok",
+        "engine": "scrapling-static",
+        "database": "connected",
+        "release": os.getenv("RENDER_GIT_COMMIT", "local")[:8],
+    }
 
 
 async def run_and_release(job: dict[str, object]) -> None:
