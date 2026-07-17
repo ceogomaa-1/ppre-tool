@@ -24,7 +24,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const canRetryCompleted = job.status === "completed" && job.rows_failed > 0;
   if (!['queued', 'paused', 'failed'].includes(job.status) && !canRetryCompleted) return Response.json({ error: "Job cannot be started" }, { status: 409 });
   if (!job.cost_estimate_complete) {
-    return Response.json({ error: "This legacy run is locked because paid search fees were not tracked. Start a new cost-capped enrichment." }, { status: 409 });
+    return Response.json({ error: "This legacy run is read-only because its paid search fees were not fully tracked. Start a new cost-capped enrichment." }, { status: 409 });
   }
 
   const workerUrl = process.env.WORKER_URL;

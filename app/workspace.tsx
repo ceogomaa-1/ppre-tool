@@ -298,7 +298,8 @@ export function Workspace() {
   const pendingCount = leads.filter((lead) => lead.status === "queued" || lead.status === "reviewing" || lead.status === "attention").length;
   const verifiedCount = leads.filter((lead) => lead.status === "verified").length;
   const avgConfidence = leads.length ? leads.reduce((sum, lead) => sum + lead.confidence, 0) / leads.length : 0;
-  const activeJob = jobs.find((job) => ["running", "paused", "queued"].includes(job.status)) ?? jobs[0] ?? null;
+  const jobsWithRecords = jobs.filter((job) => job.rowsTotal > 0);
+  const activeJob = jobsWithRecords.find((job) => ["running", "paused", "queued"].includes(job.status)) ?? jobsWithRecords[0] ?? null;
   const activeDataset = activeJob ? datasets.find((dataset) => dataset.id === activeJob.datasetId) : null;
   const runTotal = activeJob?.rowsTotal ?? 0;
   const runCompleted = activeJob?.rowsCompleted ?? 0;
@@ -308,7 +309,7 @@ export function Workspace() {
   const isRunning = activeJob?.status === "running";
   const legacyCostLocked = Boolean(activeJob && !activeJob.costEstimateComplete);
   const needsRetry = Boolean(activeJob && activeJob.rowsFailed > 0 && (activeJob.status === "failed" || activeJob.status === "completed"));
-  const jobStatusLabel = legacyCostLocked ? "Locked for safety"
+  const jobStatusLabel = legacyCostLocked ? "Legacy run ended"
     : activeJob?.status === "running" ? `${runProgress}%`
     : activeJob?.status === "queued" ? "Starting"
     : needsRetry ? "Needs retry"
@@ -316,7 +317,7 @@ export function Workspace() {
     : activeJob?.status === "failed" ? "Failed"
     : activeJob?.status === "cancelled" ? "Cancelled"
     : "Paused";
-  const jobStatusDetail = legacyCostLocked ? "Legacy search fees were not tracked; this run cannot resume"
+  const jobStatusDetail = legacyCostLocked ? "This old run is read-only; start a new enrichment or redo individual records"
     : activeJob?.status === "running" ? "Workers researching public sources"
     : activeJob?.status === "queued" ? "Waiting for a worker to claim this job"
     : needsRetry ? `${runFailed.toLocaleString()} records failed and can be retried`
@@ -455,7 +456,8 @@ export function Workspace() {
       return;
     }
     if (legacyCostLocked) {
-      setToast("This legacy run is locked because it did not track paid search fees. Start a new cost-capped enrichment.");
+      setUploadOpen(true);
+      setToast("This old run remains read-only. New enrichments use live cost tracking and a spend cap.");
       return;
     }
     setJobBusy(true);
@@ -652,7 +654,7 @@ export function Workspace() {
               <div className="progress"><span style={{ width: `${runProgress}%` }} /></div>
               <div className="run-foot"><span><span className={`pulse ${isRunning ? "" : "pulse-paused"}`} />{jobStatusDetail}</span><span>{activeJob?.rowsFailed ? `${activeJob.rowsFailed} need attention` : "Evidence retained automatically"}</span></div>
             </div>
-            <button className="pause-button" type="button" disabled={jobBusy || legacyCostLocked || activeJob.status === "completed" && !needsRetry} onClick={() => void toggleActiveJob()} aria-label={isRunning ? "Pause enrichment" : needsRetry ? "Retry failed records" : "Resume enrichment"}>{jobBusy ? <LoaderCircle className="spin" size={17} /> : legacyCostLocked ? <LockKeyhole size={17} /> : isRunning ? <Pause size={17} /> : <Play size={17} />}</button>
+            <button className="pause-button" type="button" disabled={jobBusy || (!legacyCostLocked && activeJob.status === "completed" && !needsRetry)} onClick={() => void toggleActiveJob()} aria-label={legacyCostLocked ? "Start a new enrichment" : isRunning ? "Pause enrichment" : needsRetry ? "Retry failed records" : "Resume enrichment"}>{jobBusy ? <LoaderCircle className="spin" size={17} /> : legacyCostLocked ? <Plus size={17} /> : isRunning ? <Pause size={17} /> : <Play size={17} />}</button>
           </section> : null}
 
           {view === "exports" ? <section className="bulk-export-card">
