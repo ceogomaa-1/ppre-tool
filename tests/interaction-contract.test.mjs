@@ -37,11 +37,17 @@ test("account, persistence, review, job, pagination, selection and export flows 
     "refreshWorkspace",
     "updateLeadReview",
     "deleteLead",
+    "deleteLeadsBulk",
+    "createLeadRedoJob",
     "updateEnrichmentJob",
     "deleteDataset",
     "selectedLeadIds",
     "setPage",
     "exportCsv",
+    "Export stopped:",
+    "Delete all queued",
+    "Delete all needs review",
+    "Redo search",
     "Export all",
   ]) {
     assert.match(workspace, new RegExp(capability));

@@ -80,6 +80,7 @@ export function datasetToLeads(dataset: ParsedDataset): PropertyLead[] {
     propertyType: value(row, "propertyType") || "Unknown",
     confidence: value(row, "email") || value(row, "phone") ? 52 : 0,
     status: "queued",
+    databaseStatus: "queued",
     sources: [],
     updatedAt: "Queued",
   }));

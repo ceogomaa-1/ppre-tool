@@ -13,6 +13,7 @@ export const sampleLeads: PropertyLead[] = [
     propertyType: "Detached",
     confidence: 96,
     status: "verified",
+    databaseStatus: "verified",
     updatedAt: "18 sec ago",
     sources: [
       { label: "Business registry", url: "https://ised-isde.canada.ca/", detail: "Owner and company address alignment", capturedAt: "Today, 12:42 PM" },
@@ -32,6 +33,7 @@ export const sampleLeads: PropertyLead[] = [
     propertyType: "Semi-detached",
     confidence: 91,
     status: "verified",
+    databaseStatus: "verified",
     updatedAt: "1 min ago",
     sources: [
       { label: "Corporate directory", url: "https://ised-isde.canada.ca/", detail: "Name, city and employer match", capturedAt: "Today, 12:40 PM" },
@@ -50,6 +52,7 @@ export const sampleLeads: PropertyLead[] = [
     propertyType: "Mixed use",
     confidence: 74,
     status: "reviewing",
+    databaseStatus: "researching",
     updatedAt: "2 min ago",
     sources: [
       { label: "Public directory", url: "https://www.canada411.ca/", detail: "Phone and neighbourhood match", capturedAt: "Today, 12:38 PM" },
@@ -67,6 +70,7 @@ export const sampleLeads: PropertyLead[] = [
     propertyType: "Commercial",
     confidence: 98,
     status: "verified",
+    databaseStatus: "verified",
     updatedAt: "3 min ago",
     sources: [
       { label: "Company website", url: "https://example.com/", detail: "Domain and legal entity match", capturedAt: "Today, 12:37 PM" },
@@ -85,6 +89,7 @@ export const sampleLeads: PropertyLead[] = [
     propertyType: "Townhouse",
     confidence: 41,
     status: "attention",
+    databaseStatus: "needs_review",
     updatedAt: "4 min ago",
     sources: [
       { label: "Municipal record", url: "https://www.toronto.ca/", detail: "Property confirmed; identity is ambiguous", capturedAt: "Today, 12:35 PM" },
@@ -102,6 +107,7 @@ export const sampleLeads: PropertyLead[] = [
     propertyType: "Retail",
     confidence: 0,
     status: "queued",
+    databaseStatus: "queued",
     updatedAt: "Queued",
     sources: [],
   },

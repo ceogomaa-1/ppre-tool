@@ -20,6 +20,7 @@ export type PropertyLead = {
   propertyType: string;
   confidence: number;
   status: LeadStatus;
+  databaseStatus: "queued" | "researching" | "verified" | "needs_review" | "not_found" | "failed";
   sources: Evidence[];
   updatedAt: string;
 };

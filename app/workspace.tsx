@@ -28,6 +28,7 @@ import {
   Phone,
   Play,
   Plus,
+  RotateCcw,
   Search,
   Settings2,
   ShieldCheck,
@@ -44,7 +45,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { datasetToLeads, parseDataset } from "@/lib/import-dataset";
 import {
   deleteLead,
+  deleteLeadsBulk,
   deleteDataset,
+  createLeadRedoJob,
   getSupabaseClient,
   loadDatasets,
   loadEnrichmentJobs,
@@ -53,6 +56,7 @@ import {
   updateEnrichmentJob,
   updateLeadReview,
 } from "@/lib/supabase";
+import type { BulkDeleteScope } from "@/lib/supabase";
 import type { DatasetSummary, EnrichmentJob, LeadStatus, ParsedDataset, PropertyLead } from "@/lib/types";
 
 type View = "overview" | "enrichment" | "datasets" | "exports" | "team" | "settings";
@@ -204,6 +208,8 @@ export function Workspace() {
   const [toast, setToast] = useState<string | null>(null);
   const [jobBusy, setJobBusy] = useState(false);
   const [deletingLeadId, setDeletingLeadId] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [redoingLeadId, setRedoingLeadId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refreshWorkspace = useCallback(async (activeUser: User) => {
@@ -382,8 +388,17 @@ export function Workspace() {
       setToast("There are no records to export in this view.");
       return;
     }
+    const exportable = chosen.filter((lead) => Boolean((lead.email || lead.phone) && lead.sources.length));
+    const skipped = chosen.length - exportable.length;
+    if (!exportable.length) {
+      setToast("Export stopped: these records have no source-backed email or phone yet. Use Redo search first.");
+      return;
+    }
+    if (skipped && !window.confirm(
+      `${skipped.toLocaleString()} of ${chosen.length.toLocaleString()} selected records have no source-backed email or phone. Export the ${exportable.length.toLocaleString()} contact-ready records and skip the empty ones?`
+    )) return;
     const headers = ["Owner", "Property address", "City", "Province", "Postal code", "Email", "Phone", "Property type", "Confidence", "Status", "Source URLs"];
-    const body = chosen.map((lead) => [
+    const body = exportable.map((lead) => [
       lead.owner, lead.address, lead.city, lead.province, lead.postalCode, lead.email, lead.phone,
       lead.propertyType, lead.confidence, statusMeta[lead.status].label, lead.sources.map((source) => source.url).join(" | "),
     ].map(safeCsvCell).join(","));
@@ -394,7 +409,7 @@ export function Workspace() {
     anchor.download = `acreline-enrichment-${new Date().toISOString().slice(0, 10)}.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
-    setToast(`Exported ${chosen.length.toLocaleString()} source-backed records.`);
+    setToast(`Exported ${exportable.length.toLocaleString()} contact-ready record${exportable.length === 1 ? "" : "s"}${skipped ? `; skipped ${skipped.toLocaleString()} without contacts` : ""}.`);
   }
 
   async function sendMagicLink(event: React.FormEvent) {
@@ -506,6 +521,53 @@ export function Workspace() {
       setToast(error instanceof Error ? error.message : "The record could not be deleted.");
     } finally {
       setDeletingLeadId(null);
+    }
+  }
+
+  async function removeLeadsBulk(scope: BulkDeleteScope) {
+    const ids = scope === "selected" ? [...selectedLeadIds] : [];
+    const count = scope === "selected" ? ids.length
+      : scope === "queued" ? leads.filter((lead) => lead.databaseStatus === "queued").length
+      : scope === "needs_review" ? leads.filter((lead) => lead.databaseStatus === "needs_review").length
+      : leads.length;
+    if (!count) {
+      setToast(scope === "selected" ? "Select at least one record first." : `There are no ${scope.replace("_", " ")} records to delete.`);
+      return;
+    }
+    const label = scope === "selected" ? "selected"
+      : scope === "queued" ? "queued"
+      : scope === "needs_review" ? "needs-review"
+      : "all";
+    if (!window.confirm(`Permanently delete ${count.toLocaleString()} ${label} record${count === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    setBulkBusy(true);
+    try {
+      const deleted = await deleteLeadsBulk(scope, ids);
+      setSelectedLeadIds(new Set());
+      setSelected(null);
+      if (user) await refreshWorkspace(user);
+      setSelected(null);
+      setToast(`Deleted ${deleted.toLocaleString()} record${deleted === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The records could not be deleted.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function redoLeadSearch(lead: PropertyLead) {
+    if (!window.confirm(
+      `Redo the public-web search for ${lead.owner}? The current result and evidence will be replaced, cached results will be bypassed, and API spend is capped at $0.25.`
+    )) return;
+    setRedoingLeadId(lead.id);
+    try {
+      await createLeadRedoJob(lead.id, 0.25);
+      if (user) await refreshWorkspace(user);
+      setView("enrichment");
+      setToast(`Fresh search started for ${lead.owner}. Cached results are being ignored.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The fresh search could not start.");
+    } finally {
+      setRedoingLeadId(null);
     }
   }
 
@@ -625,12 +687,12 @@ export function Workspace() {
             </div>
             <div className="bulk-selection-bar">
               <span>{selectedLeadIds.size ? `${selectedLeadIds.size.toLocaleString()} selected` : "Select records for a custom export"}</span>
-              <div><button type="button" onClick={() => setSelectedLeadIds(new Set(filteredLeads.map((lead) => lead.id)))}>Select all {filteredLeads.length.toLocaleString()}</button>{selectedLeadIds.size ? <button type="button" onClick={() => setSelectedLeadIds(new Set())}>Clear</button> : null}{selectedLeadIds.size ? <button type="button" onClick={() => exportCsv(leads)}><ArrowDownToLine size={14} />Export selected</button> : null}</div>
+              <div><button type="button" onClick={() => setSelectedLeadIds(new Set(filteredLeads.map((lead) => lead.id)))}>Select all {filteredLeads.length.toLocaleString()}</button>{selectedLeadIds.size ? <button type="button" onClick={() => setSelectedLeadIds(new Set())}>Clear</button> : null}{selectedLeadIds.size ? <button type="button" onClick={() => exportCsv(leads)}><ArrowDownToLine size={14} />Export selected</button> : null}<label className="bulk-delete-control"><Trash2 size={14} /><select aria-label="Bulk delete records" value="" disabled={bulkBusy} onChange={(event) => { const scope = event.target.value as BulkDeleteScope; if (scope) void removeLeadsBulk(scope); }}><option value="">{bulkBusy ? "Deleting…" : "Delete records…"}</option>{selectedLeadIds.size ? <option value="selected">Delete selected ({selectedLeadIds.size})</option> : null}<option value="queued">Delete all queued</option><option value="needs_review">Delete all needs review</option><option value="all">Delete all records</option></select></label></div>
             </div>
             <div className="table-wrap">
               <table>
                 <thead><tr><th><input type="checkbox" aria-label="Select this page" checked={pageLeads.length > 0 && pageLeads.every((lead) => selectedLeadIds.has(lead.id))} onChange={(event) => setSelectedLeadIds((current) => { const next = new Set(current); pageLeads.forEach((lead) => { if (event.target.checked) next.add(lead.id); else next.delete(lead.id); }); return next; })} /></th><th>Owner & property</th><th>Contact found</th><th>Confidence</th><th>Status</th><th>Sources</th><th /></tr></thead>
-                <tbody>{pageLeads.map((lead) => <tr key={lead.id} onClick={() => setSelected(lead)} className={selected?.id === lead.id ? "row-selected" : ""}><td><input type="checkbox" aria-label={`Select ${lead.owner}`} checked={selectedLeadIds.has(lead.id)} onClick={(event) => event.stopPropagation()} onChange={(event) => setSelectedLeadIds((current) => { const next = new Set(current); if (event.target.checked) next.add(lead.id); else next.delete(lead.id); return next; })} /></td><td><div className="owner-cell"><span className="owner-avatar">{initials(lead.owner)}</span><div><strong>{lead.owner}</strong><span>{lead.address}{lead.city ? ` · ${lead.city}` : ""}</span></div></div></td><td><div className="contact-cell">{lead.email ? <span><Mail size={13} />{lead.email}</span> : null}{lead.phone ? <span><Phone size={13} />{lead.phone}</span> : null}{!lead.email && !lead.phone ? <span className="muted-contact">Not found yet</span> : null}</div></td><td><Confidence value={lead.confidence} /></td><td><StatusBadge status={lead.status} /></td><td><div className="source-stack">{lead.sources.slice(0, 3).map((source) => <span key={source.url} title={source.label}>{source.label[0]}</span>)}{lead.sources.length ? <small>{lead.sources.length}</small> : <small>—</small>}</div></td><td><div className="row-actions"><button className="row-action row-delete" type="button" disabled={deletingLeadId === lead.id} aria-label={`Delete ${lead.owner}`} onClick={(event) => { event.stopPropagation(); void removeLead(lead); }}>{deletingLeadId === lead.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button><button className="row-action" type="button" aria-label={`Open ${lead.owner}`} onClick={(event) => { event.stopPropagation(); setSelected(lead); }}><ArrowRight size={16} /></button></div></td></tr>)}</tbody>
+                <tbody>{pageLeads.map((lead) => <tr key={lead.id} onClick={() => setSelected(lead)} className={selected?.id === lead.id ? "row-selected" : ""}><td><input type="checkbox" aria-label={`Select ${lead.owner}`} checked={selectedLeadIds.has(lead.id)} onClick={(event) => event.stopPropagation()} onChange={(event) => setSelectedLeadIds((current) => { const next = new Set(current); if (event.target.checked) next.add(lead.id); else next.delete(lead.id); return next; })} /></td><td><div className="owner-cell"><span className="owner-avatar">{initials(lead.owner)}</span><div><strong>{lead.owner}</strong><span>{lead.address}{lead.city ? ` · ${lead.city}` : ""}</span></div></div></td><td><div className="contact-cell">{lead.email ? <span><Mail size={13} />{lead.email}</span> : null}{lead.phone ? <span><Phone size={13} />{lead.phone}</span> : null}{!lead.email && !lead.phone ? <span className="muted-contact">Not found yet</span> : null}</div></td><td><Confidence value={lead.confidence} /></td><td><StatusBadge status={lead.status} /></td><td><div className="source-stack">{lead.sources.slice(0, 3).map((source) => <span key={source.url} title={source.label}>{source.label[0]}</span>)}{lead.sources.length ? <small>{lead.sources.length}</small> : <small>—</small>}</div></td><td><div className="row-actions"><button className="row-action row-redo" type="button" disabled={redoingLeadId === lead.id} aria-label={`Redo search for ${lead.owner}`} title="Redo search" onClick={(event) => { event.stopPropagation(); void redoLeadSearch(lead); }}>{redoingLeadId === lead.id ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}</button><button className="row-action row-delete" type="button" disabled={deletingLeadId === lead.id} aria-label={`Delete ${lead.owner}`} onClick={(event) => { event.stopPropagation(); void removeLead(lead); }}>{deletingLeadId === lead.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button><button className="row-action" type="button" aria-label={`Open ${lead.owner}`} onClick={(event) => { event.stopPropagation(); setSelected(lead); }}><ArrowRight size={16} /></button></div></td></tr>)}</tbody>
               </table>
               {!pageLeads.length ? <div className="empty-table"><Inbox size={26} /><strong>{accountLoading ? "Loading your workspace…" : user ? "No matching records" : "No matching preview records"}</strong><span>{user && !leads.length ? "Import a spreadsheet to begin." : "Try a different search or filter."}</span></div> : null}
             </div>
@@ -641,7 +703,7 @@ export function Workspace() {
         </div>
       </main>
 
-      {selected ? <aside className="detail-panel" aria-label="Record detail"><div className="detail-top"><span>Record intelligence</span><button type="button" onClick={() => setSelected(null)} aria-label="Close detail"><X size={18} /></button></div><div className="detail-identity"><span className="detail-avatar">{initials(selected.owner)}</span><div><h2>{selected.owner}</h2><p>{selected.address}<br />{[selected.city, selected.province, selected.postalCode].filter(Boolean).join(", ")}</p></div></div><div className="detail-score"><div><span>Evidence confidence</span><strong>{selected.confidence || "—"}<small>{selected.confidence ? "%" : ""}</small></strong></div><div className="score-track"><span style={{ width: `${selected.confidence}%` }} /></div><p>{selected.status === "verified" ? "The same contact was corroborated on at least two independent domains." : selected.email || selected.phone ? "Single-source candidate—confirm it against the linked page before outreach." : "No contact has been corroborated for this record."}</p></div><div className="detail-section"><div className="detail-label"><span>Contact points</span><StatusBadge status={selected.status} /></div><div className="contact-box"><Mail size={16} /><div><span>{selected.status === "verified" ? "Verified email" : "Candidate email"}</span><strong>{selected.email ?? "Not found"}</strong></div>{selected.email ? selected.status === "verified" ? <BadgeCheck size={16} className="verified-icon" /> : <CircleAlert size={16} /> : <Clock3 size={16} />}</div><div className="contact-box"><Phone size={16} /><div><span>{selected.status === "verified" ? "Verified phone" : "Candidate phone"}</span><strong>{selected.phone ?? "Not found"}</strong></div>{selected.phone ? selected.status === "verified" ? <BadgeCheck size={16} className="verified-icon" /> : <CircleAlert size={16} /> : null}</div></div><div className="detail-section evidence-section"><div className="detail-label"><span>Evidence trail</span><small>{selected.sources.length} sources</small></div>{selected.sources.length ? selected.sources.map((source, index) => <a className="evidence" href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}><span className="evidence-icon"><Link2 size={15} /></span><div><strong>{source.label}</strong><p>{source.detail}</p><small>{source.capturedAt}</small></div><ArrowRight size={14} /></a>) : <div className="evidence-empty"><LoaderCircle size={18} /><span>No retained evidence for this record.</span></div>}</div><div className="detail-note"><CircleAlert size={16} /><p>Confirm outreach decisions against the linked source. Public contact data may become stale.</p></div><div className="detail-actions"><button className="button primary detail-action" type="button" onClick={() => void approveSelectedRecord()} disabled={approvedLeadIds.has(selected.id)}><Check size={17} />{approvedLeadIds.has(selected.id) ? "Approved" : "Approve record"}</button><button className="button danger detail-delete" type="button" disabled={deletingLeadId === selected.id} onClick={() => void removeLead(selected)}>{deletingLeadId === selected.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}Delete record</button></div></aside> : null}
+      {selected ? <aside className="detail-panel" aria-label="Record detail"><div className="detail-top"><span>Record intelligence</span><button type="button" onClick={() => setSelected(null)} aria-label="Close detail"><X size={18} /></button></div><div className="detail-identity"><span className="detail-avatar">{initials(selected.owner)}</span><div><h2>{selected.owner}</h2><p>{selected.address}<br />{[selected.city, selected.province, selected.postalCode].filter(Boolean).join(", ")}</p></div></div><div className="detail-score"><div><span>Evidence confidence</span><strong>{selected.confidence || "—"}<small>{selected.confidence ? "%" : ""}</small></strong></div><div className="score-track"><span style={{ width: `${selected.confidence}%` }} /></div><p>{selected.status === "verified" ? "The same contact was corroborated on at least two independent domains." : selected.email || selected.phone ? "Single-source candidate—confirm it against the linked page before outreach." : "No contact has been corroborated for this record."}</p></div><div className="detail-section"><div className="detail-label"><span>Contact points</span><StatusBadge status={selected.status} /></div><div className="contact-box"><Mail size={16} /><div><span>{selected.status === "verified" ? "Verified email" : "Candidate email"}</span><strong>{selected.email ?? "Not found"}</strong></div>{selected.email ? selected.status === "verified" ? <BadgeCheck size={16} className="verified-icon" /> : <CircleAlert size={16} /> : <Clock3 size={16} />}</div><div className="contact-box"><Phone size={16} /><div><span>{selected.status === "verified" ? "Verified phone" : "Candidate phone"}</span><strong>{selected.phone ?? "Not found"}</strong></div>{selected.phone ? selected.status === "verified" ? <BadgeCheck size={16} className="verified-icon" /> : <CircleAlert size={16} /> : null}</div></div><div className="detail-section evidence-section"><div className="detail-label"><span>Evidence trail</span><small>{selected.sources.length} sources</small></div>{selected.sources.length ? selected.sources.map((source, index) => <a className="evidence" href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}><span className="evidence-icon"><Link2 size={15} /></span><div><strong>{source.label}</strong><p>{source.detail}</p><small>{source.capturedAt}</small></div><ArrowRight size={14} /></a>) : <div className="evidence-empty"><LoaderCircle size={18} /><span>No retained evidence for this record.</span></div>}</div><div className="detail-note"><CircleAlert size={16} /><p>Confirm outreach decisions against the linked source. Public contact data may become stale.</p></div><div className="detail-actions"><button className="button secondary detail-action" type="button" disabled={redoingLeadId === selected.id} onClick={() => void redoLeadSearch(selected)}>{redoingLeadId === selected.id ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}Redo search</button><button className="button primary detail-action" type="button" onClick={() => void approveSelectedRecord()} disabled={approvedLeadIds.has(selected.id)}><Check size={17} />{approvedLeadIds.has(selected.id) ? "Approved" : "Approve record"}</button><button className="button danger detail-delete" type="button" disabled={deletingLeadId === selected.id} onClick={() => void removeLead(selected)}>{deletingLeadId === selected.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}Delete record</button></div></aside> : null}
 
       {uploadOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setUploadOpen(false); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title"><div className="modal-head"><div><span className="modal-icon"><UploadCloud size={20} /></span><div><p>New enrichment</p><h2 id="upload-title">Bring your owner data</h2></div></div><button type="button" onClick={() => setUploadOpen(false)} aria-label="Close import"><X size={19} /></button></div>{!parsed ? <><button className="dropzone" type="button" onClick={() => fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFile(event.dataTransfer.files[0]); }}><span className="drop-icon"><FileSpreadsheet size={25} /></span><strong>{importState === "parsing" ? "Reading your dataset…" : "Drop a spreadsheet here"}</strong><span>or choose a file from your computer</span><small>CSV, TSV or XLSX · up to 25,000 rows</small><input ref={fileInput} type="file" accept=".csv,.tsv,.xlsx" hidden onChange={(event) => void handleFile(event.target.files?.[0])} /></button><div className="import-features"><span><ShieldCheck size={15} />Private by default</span><span><Sparkles size={15} />Smart column mapping</span><span><FileCheck2 size={15} />Duplicate-aware</span></div></> : <><div className="file-summary"><span className="file-icon"><FileSpreadsheet size={21} /></span><div><strong>{parsed.fileName}</strong><span>{parsed.rows.length.toLocaleString()} records · {parsed.headers.length} columns</span></div><button type="button" onClick={() => setParsed(null)}>Replace</button></div><div className="mapping-head"><div><h3>Column mapping</h3><span>We matched the fields needed for research.</span></div><span className="mapping-score"><BadgeCheck size={14} />{Object.values(parsed.mapping).filter(Boolean).length} matched</span></div><div className="mapping-grid">{Object.entries(parsed.mapping).map(([field, header]) => <label key={field}><span>{field.replace(/([A-Z])/g, " $1")}</span><select value={header ?? ""} onChange={(event) => setParsed((current) => current ? { ...current, mapping: { ...current.mapping, [field]: event.target.value || null } } : current)}><option value="">Not mapped</option>{parsed.headers.map((item) => <option key={item}>{item}</option>)}</select></label>)}</div><div className="preview-table"><div className="preview-row preview-header"><span>Owner</span><span>Property address</span><span>City</span></div>{datasetToLeads({ ...parsed, rows: parsed.rows.slice(0, 3) }).map((lead) => <div className="preview-row" key={lead.id}><span>{lead.owner}</span><span>{lead.address}</span><span>{lead.city || "—"}</span></div>)}</div><label className="budget-control"><span><strong>Maximum API spend</strong><small>The worker pauses before the next record when its tracked cost reaches this guardrail.</small></span><span className="budget-input"><b>$</b><input type="number" min="0.25" max="25" step="0.25" value={costLimitUsd} onChange={(event) => setCostLimitUsd(Math.min(25, Math.max(0.25, Number(event.target.value) || 0.25)))} /></span></label></>}{parseError ? <div className="form-error"><CircleAlert size={15} />{parseError}</div> : null}<div className="modal-foot"><p><ShieldCheck size={14} />{user ? "Private import · exact token and web-search fees tracked." : "Sign in is required before anything is saved."}</p><div><button className="button secondary" type="button" onClick={() => setUploadOpen(false)}>Cancel</button><button className="button primary" type="button" disabled={!parsed || importState === "saving"} onClick={() => void startImport()}>{importState === "saving" ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}Start enrichment</button></div></div></section></div> : null}
 

@@ -1,7 +1,8 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from acreline_worker.models import DiscoveryResult, ScrapedEvidence
+from acreline_worker.models import DiscoveryResult, Lead, ScrapedEvidence
 from acreline_worker.pipeline import EnrichmentPipeline, _merge_evidence
 
 
@@ -34,6 +35,31 @@ class PipelineClaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(filters, {"dataset_id": "eq.dataset-1", "status": "eq.failed"})
         self.assertEqual(payload["status"], "queued")
         self.assertIsNone(payload["last_error"])
+
+    async def test_force_refresh_bypasses_a_valid_cached_result(self) -> None:
+        pipeline = object.__new__(EnrichmentPipeline)
+        pipeline.db = AsyncMock()
+        pipeline.db.select.return_value = [{"result": {"status": "not_found", "confidence": 0}}]
+        pipeline.discovery = SimpleNamespace(
+            discover=AsyncMock(return_value=(DiscoveryResult(candidates=[], summary="Fresh search completed."), 11, 7, 1))
+        )
+        pipeline.scraper = SimpleNamespace(fetch=AsyncMock())
+        pipeline.settings = SimpleNamespace(cache_ttl_days=30)
+        lead = Lead(
+            id="lead-1",
+            dataset_id="dataset-1",
+            user_id="user-1",
+            owner_name="Example Owner",
+            property_address="10 Main Street",
+            city="Oshawa",
+            province="ON",
+        )
+
+        usage = await pipeline._process_lead(lead, "gpt-4o-mini", 3, force_refresh=True)
+
+        self.assertEqual(usage, (11, 7, 1))
+        pipeline.discovery.discover.assert_awaited_once()
+        self.assertGreaterEqual(pipeline.db.update.await_count, 2)
 
 
 class EvidenceMergeTests(unittest.TestCase):

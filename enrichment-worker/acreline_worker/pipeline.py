@@ -117,9 +117,13 @@ class EnrichmentPipeline:
 
         now = datetime.now(UTC).isoformat()
         if int(job.get("rows_failed", 0)) > 0:
+            failed_filters = {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.failed"}
+            target_ids = job.get("configuration", {}).get("target_lead_ids", [])
+            if target_ids:
+                failed_filters["id"] = f"in.({','.join(str(value) for value in target_ids)})"
             await self.db.update(
                 "leads",
-                {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.failed"},
+                failed_filters,
                 {"status": "queued", "last_error": None, "updated_at": now},
             )
             job["rows_failed"] = 0
@@ -138,7 +142,10 @@ class EnrichmentPipeline:
 
     async def run_claimed(self, job: dict[str, Any]) -> None:
         job_id = str(job["id"])
-        max_records = min(int(job.get("configuration", {}).get("max_records", 500)), 25_000)
+        configuration = job.get("configuration", {})
+        max_records = min(int(configuration.get("max_records", 500)), 25_000)
+        target_ids = [str(value) for value in configuration.get("target_lead_ids", [])]
+        force_refresh = bool(configuration.get("force_refresh", False))
 
         completed = int(job.get("rows_completed", 0))
         failed = int(job.get("rows_failed", 0))
@@ -146,7 +153,7 @@ class EnrichmentPipeline:
         output_tokens = int(job.get("output_tokens", 0))
         web_search_calls = int(job.get("web_search_calls", 0))
         model = str(job.get("model") or self.settings.openai_model)
-        source_limit = min(int(job.get("configuration", {}).get("source_limit", 3)), self.settings.max_sources_per_lead, 3)
+        source_limit = min(int(configuration.get("source_limit", 3)), self.settings.max_sources_per_lead, 3)
         cost_limit = Decimal(str(job.get("cost_limit_usd") or "2.00"))
         processed_this_run = 0
         repeated_error = ""
@@ -162,15 +169,18 @@ class EnrichmentPipeline:
                 )
                 if not current or current[0]["status"] != "running":
                     return
+                lead_filters = {
+                    "dataset_id": f"eq.{job['dataset_id']}",
+                    "status": "eq.queued",
+                    "select": "*",
+                    "order": "row_number.asc",
+                    "limit": str(min(500, max_records - processed_this_run)),
+                }
+                if target_ids:
+                    lead_filters["id"] = f"in.({','.join(target_ids)})"
                 rows = await self.db.select(
                     "leads",
-                    {
-                        "dataset_id": f"eq.{job['dataset_id']}",
-                        "status": "eq.queued",
-                        "select": "*",
-                        "order": "row_number.asc",
-                        "limit": str(min(500, max_records - processed_this_run)),
-                    },
+                    lead_filters,
                 )
                 if not rows:
                     break
@@ -200,7 +210,9 @@ class EnrichmentPipeline:
                         )
                         return
                     try:
-                        used_input, used_output, used_searches = await self._process_lead(lead, model, source_limit)
+                        used_input, used_output, used_searches = await self._process_lead(
+                            lead, model, source_limit, force_refresh=force_refresh
+                        )
                         input_tokens += used_input
                         output_tokens += used_output
                         web_search_calls += used_searches
@@ -218,37 +230,64 @@ class EnrichmentPipeline:
                     if repeated_error_count >= 3:
                         raise RuntimeError(f"Systemic enrichment failure after 3 records: {repeated_error}")
 
+            remaining_filters = {
+                "dataset_id": f"eq.{job['dataset_id']}",
+                "status": "eq.queued",
+                "select": "id",
+                "limit": "1",
+            }
+            if target_ids:
+                remaining_filters["id"] = f"in.({','.join(target_ids)})"
             remaining = await self.db.select(
                 "leads",
-                {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.queued", "select": "id", "limit": "1"},
+                remaining_filters,
             )
             final_status = "paused" if remaining else "failed" if failed else "completed"
             await self._update_job(job_id, completed, failed, input_tokens, output_tokens, web_search_calls, model=model, final_status=final_status)
-            matched = await self.db.select(
+            dataset_rows = await self.db.select(
                 "leads",
-                {"dataset_id": f"eq.{job['dataset_id']}", "status": "eq.verified", "select": "id", "limit": "25000"},
+                {"dataset_id": f"eq.{job['dataset_id']}", "select": "id,status", "limit": "25000"},
+            )
+            matched = sum(1 for row in dataset_rows if row["status"] == "verified")
+            dataset_failed = sum(1 for row in dataset_rows if row["status"] == "failed")
+            dataset_processed = sum(
+                1 for row in dataset_rows
+                if row["status"] in {"verified", "needs_review", "not_found", "failed"}
+            )
+            dataset_status = (
+                "paused"
+                if any(row["status"] in {"queued", "researching"} for row in dataset_rows)
+                else final_status
             )
             await self.db.update(
                 "datasets",
                 {"id": f"eq.{job['dataset_id']}"},
-                {"status": final_status, "processed_count": completed + failed, "matched_count": len(matched), "failed_count": failed, "updated_at": datetime.now(UTC).isoformat()},
+                {
+                    "status": dataset_status,
+                    "processed_count": dataset_processed,
+                    "matched_count": matched,
+                    "failed_count": dataset_failed,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
             )
         except Exception:
             await self.db.update("enrichment_jobs", {"id": f"eq.{job_id}"}, {"status": "failed", "updated_at": datetime.now(UTC).isoformat()})
             await self.db.update(
                 "datasets",
                 {"id": f"eq.{job['dataset_id']}"},
-                {"status": "failed", "processed_count": completed + failed, "failed_count": failed, "updated_at": datetime.now(UTC).isoformat()},
+                {"status": "failed", "updated_at": datetime.now(UTC).isoformat()},
             )
             raise
 
-    async def _process_lead(self, lead: Lead, model: str, source_limit: int) -> tuple[int, int, int]:
+    async def _process_lead(
+        self, lead: Lead, model: str, source_limit: int, *, force_refresh: bool = False
+    ) -> tuple[int, int, int]:
         key = fingerprint(lead)
         cached = await self.db.select(
             "enrichment_cache",
             {"user_id": f"eq.{lead.user_id}", "fingerprint": f"eq.{key}", "expires_at": f"gt.{datetime.now(UTC).isoformat()}", "select": "result", "limit": "1"},
         )
-        if cached:
+        if cached and not force_refresh:
             await self.db.update("leads", {"id": f"eq.{lead.id}"}, cached[0]["result"])
             return 0, 0, 0
 

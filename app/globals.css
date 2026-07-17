@@ -185,6 +185,7 @@ button { color: inherit; }
 .filter-wrap { height: 34px; display: flex; align-items: center; gap: 6px; padding: 0 7px 0 10px; border: 1px solid var(--line); border-radius: 9px; background: #f9f9f6; color: #85877f; }
 .filter-wrap select { border: 0; outline: 0; background: transparent; color: #595b54; font-size: 9px; }
 .bulk-selection-bar { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 16px; border-bottom: 1px solid var(--line); background: #fbfcf7; color: #777a71; font-size: 11px; }.bulk-selection-bar > div { display: flex; flex-wrap: wrap; gap: 6px; }.bulk-selection-bar button { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: #55584f; cursor: pointer; font-size: 10px; font-weight: 620; }.bulk-selection-bar button:hover { border-color: #bfc3b6; background: #f5f7ed; }
+.bulk-delete-control { min-height: 28px; display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border: 1px solid #e4c9c5; border-radius: 7px; background: #fff7f5; color: #a7463c; }.bulk-delete-control select { max-width: 142px; border: 0; outline: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: 10px; font-weight: 650; }.bulk-delete-control:has(select:disabled) { cursor: wait; opacity: .58; }
 .table-wrap { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th { height: 37px; padding: 0 10px; border-bottom: 1px solid var(--line); background: #f8f8f4; color: #96988f; font-size: 8px; font-weight: 670; letter-spacing: .04em; text-align: left; text-transform: uppercase; white-space: nowrap; }
@@ -220,6 +221,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .row-action { width: 27px; height: 27px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: #9a9c94; cursor: pointer; }
 .row-action:hover { background: #edeee8; color: #33342f; }
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }.row-delete { color: #b45e52; }.row-delete:hover { background: #fff0ed; color: #9f3f35; }.row-action:disabled { cursor: wait; opacity: .55; }
+.row-redo { color: #567339; }.row-redo:hover { background: #eff7e6; color: #36541b; }
 .empty-table { min-height: 220px; display: grid; place-items: center; align-content: center; gap: 7px; color: #9b9d95; }.empty-table strong { color: #555750; font-size: 11px; }.empty-table span { font-size: 9px; }
 .table-foot { min-height: 48px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-top: 1px solid var(--line); color: #91938b; font-size: 8px; }
 .table-foot div { display: flex; gap: 5px; }.table-foot button { padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: #6c6e66; cursor: pointer; font-size: 8px; }.table-foot button:disabled { color: #bbBdb6; cursor: default; }
@@ -242,7 +244,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .evidence { display: grid; grid-template-columns: 29px 1fr auto; align-items: start; gap: 9px; padding: 11px 0; border-bottom: 1px solid #ecece6; color: inherit; text-decoration: none; }.evidence:last-child { border-bottom: 0; }.evidence-icon { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 8px; background: #eeefe9; color: #777b71; }.evidence div { display: grid; gap: 3px; }.evidence strong { color: #484a44; font-size: 9px; }.evidence p { margin: 0; color: #84867e; font-size: 8px; line-height: 1.4; }.evidence small { color: #a5a79f; font-size: 7px; }.evidence > svg { margin-top: 6px; color: #a0a29a; }
 .evidence-empty { min-height: 70px; display: flex; align-items: center; gap: 9px; color: #999b93; font-size: 8px; line-height: 1.4; }.evidence-empty svg { animation: spin 1.6s linear infinite; }
 .detail-note { display: flex; gap: 8px; margin: 3px 20px 13px; padding: 10px; border-radius: 9px; background: #f6f1e7; color: #967036; }.detail-note svg { flex: 0 0 auto; }.detail-note p { margin: 0; color: #927f60; font-size: 7px; line-height: 1.45; }
-.detail-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 0 20px 24px; }.detail-actions .detail-action { width: auto; margin: 0; }.detail-delete { min-width: 126px; }
+.detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 20px 24px; }.detail-actions .detail-action { width: auto; margin: 0; }.detail-delete { grid-column: 1 / -1; min-width: 126px; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 20px; background: rgba(22,23,20,.52); backdrop-filter: blur(8px); animation: fadeIn .18s ease both; }
 @keyframes fadeIn { from { opacity: 0; } }

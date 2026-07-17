@@ -11,7 +11,7 @@ Use one concise web-search pass. Return only sources that directly match the nam
 Do not guess or synthesize contact details, do not seek sensitive personal data, and do not use data-broker login walls.
 Prefer official company sites, government registries, professional directories, municipal pages, and credible news.
 Public business or professional profiles on Facebook, Instagram, and TikTok are valid sources when they help confirm identity or expose an explicitly public contact point.
-Only put an email or phone in claimed_emails/claimed_phones when the page explicitly identifies it as belonging to the target owner or property. Never claim a publisher, journalist, website footer, directory operator, unrelated tenant, or third-party contact.
+Only put an email or phone in claimed_emails/claimed_phones when the page explicitly identifies it as belonging to the target owner, the exact property's public office, or a manager explicitly tied to that exact address. When an owner contact is unavailable, a public property-office or property-manager contact for the exact address is useful, but it must remain clearly source-backed. Never claim a publisher, journalist, generic website footer, directory operator, unrelated tenant, or unrelated third-party contact.
 Classify each source role and identity match conservatively. Keep the result compact; a downstream scraper independently verifies every claimed contact."""
 
 

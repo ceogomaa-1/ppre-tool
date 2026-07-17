@@ -15,7 +15,7 @@ type LeadRow = {
   email: string | null;
   phone: string | null;
   confidence: number | string | null;
-  status: string;
+  status: PropertyLead["databaseStatus"];
   enriched_at: string | null;
   sources: Array<{
     source_url: string;
@@ -65,6 +65,7 @@ export async function loadPropertyLeads(): Promise<PropertyLead[]> {
     propertyType: row.property_type ?? "Unknown",
     confidence: Number(row.confidence ?? 0),
     status: row.status === "verified" ? "verified" : row.status === "researching" ? "reviewing" : row.status === "queued" ? "queued" : "attention",
+    databaseStatus: row.status,
     updatedAt: row.enriched_at ? new Date(row.enriched_at).toLocaleString() : "Queued",
     sources: (row.sources ?? []).map((source) => ({
       label: source.title || source.source_domain || "Public source",
@@ -143,6 +144,44 @@ export async function deleteLead(leadId: string) {
   if (!auth.user) throw new Error("Sign in to delete records.");
   const { error } = await supabase.rpc("delete_lead", { p_lead_id: leadId });
   if (error) throw error;
+}
+
+export type BulkDeleteScope = "selected" | "queued" | "needs_review" | "all";
+
+export async function deleteLeadsBulk(scope: BulkDeleteScope, leadIds: string[] = []) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return 0;
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) throw new Error("Sign in to delete records.");
+  const { data, error } = await supabase.rpc("delete_leads_bulk", {
+    p_scope: scope,
+    p_lead_ids: leadIds,
+  });
+  if (error) throw error;
+  return Number(data ?? 0);
+}
+
+export async function createLeadRedoJob(leadId: string, costLimitUsd = 0.25) {
+  const supabase = getSupabaseClient();
+  if (!supabase) throw new Error("Acreline is not connected to the database.");
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) throw new Error("Sign in to redo a search.");
+  const { data: jobId, error } = await supabase.rpc("create_lead_redo_job", {
+    p_lead_id: leadId,
+    p_cost_limit_usd: costLimitUsd,
+  });
+  if (error) throw error;
+  const { data: session } = await supabase.auth.getSession();
+  if (!session.session?.access_token) throw new Error("Your session expired before the worker could start.");
+  const response = await fetch(`/api/jobs/${jobId}/run`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${session.session.access_token}` },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(body?.error ?? "The enrichment worker could not start the redo.");
+  }
+  return String(jobId);
 }
 
 export async function updateEnrichmentJob(jobId: string, status: "running" | "paused" | "cancelled") {
